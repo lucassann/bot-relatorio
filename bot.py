@@ -1,11 +1,12 @@
 import os
 import re
+import html
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -68,6 +69,22 @@ def get_report_actions_keyboard(has_report: bool = True):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+async def safe_reply(target, text: str, reply_markup=None, parse_mode="HTML"):
+    """
+    Envia resposta com segurança usando HTML ou fallback para texto simples
+    caso ocorra erro de formatação (entidades inválidas).
+    """
+    dest = getattr(target, "message", target)
+    try:
+        if hasattr(dest, "reply_text"):
+            return await dest.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.warning(f"Falha ao enviar com parse_mode={parse_mode}: {e}. Enviando sem formatação...")
+        clean_text = re.sub(r'<[^>]+>', '', text)
+        clean_text = clean_text.replace('*', '').replace('`', '').replace('_', '')
+        if hasattr(dest, "reply_text"):
+            return await dest.reply_text(clean_text, reply_markup=reply_markup)
+
 async def send_chunked_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, reply_markup=None):
     """Envia mensagens longas divididas em blocos de até 4000 caracteres"""
     max_len = 4000
@@ -94,210 +111,368 @@ async def send_chunked_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start"""
     user = update.effective_user
-    db_user = database.get_or_create_user(user.id, user.username, user.first_name)
+    database.get_or_create_user(user.id, user.username, user.first_name)
     database.set_user_state(user.id, STATE_IDLE)
 
     active_tpl = database.get_active_template(user.id)
     tpl_name = active_tpl["name"] if active_tpl else "Nenhum selecionado"
 
+    user_name = html.escape(user.first_name or "Usuário")
+    tpl_escaped = html.escape(tpl_name)
+
     text = (
-        f"👋 Olá, *{user.first_name}*! Bem-vindo ao seu **Gerador Inteligente de Relatórios**.\n\n"
-        f"🎯 **Estilo/Modelo Ativo Atual**: `{tpl_name}`\n\n"
+        f"👋 Olá, <b>{user_name}</b>! Bem-vindo ao seu <b>Gerador Inteligente de Relatórios</b>.\n\n"
+        f"🎯 <b>Estilo/Modelo Ativo</b>: <code>{tpl_escaped}</code>\n\n"
         "Com este bot, você pode:\n"
-        "1. **Definir seu Estilo/Layout**: Envie um PDF, Word (.docx), TXT ou digite como quer a estrutura do seu relatório.\n"
-        "2. **Gerar Relatórios**: Envie seus dados brutos, anotações ou documentos e receba o relatório formatado em **Word (.docx)**, **PDF** e **TXT**.\n"
-        "3. **Refinar e Ajustar**: Peça alterações na hora ('mude a tabela', 'adicione conclusões', 'deixe mais formal').\n\n"
+        "1. <b>Definir seu Estilo/Layout</b>: Envie um PDF, Word (.docx), TXT, ou tire uma foto de um modelo impresso, ou dite como deseja a estrutura.\n"
+        "2. <b>Gerar Relatórios por Texto, Arquivo ou Fotos</b>: Envie rascunhos, planilhas ou <b>fotos/imagens</b> (recibos, notas fiscais, relatórios escaneados, fotos de lousa, anotações manuscritas) — a I.A extrai todos os dados e gera o documento em <b>Word (.docx)</b>, <b>PDF</b> e <b>TXT</b>.\n"
+        "3. <b>Refinar e Ajustar</b>: Peça alterações na hora (<i>'mude a tabela', 'adicione conclusões', 'deixe mais formal'</i>).\n\n"
         "O que deseja fazer agora?"
     )
 
-    await update.message.reply_text(
-        text=text,
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
+    await safe_reply(update.message, text, reply_markup=get_main_keyboard())
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ajuda"""
     text = (
-        "📖 **Guia Rápido de Uso**:\n\n"
-        "🔹 **Como definir o estilo desejado?**\n"
-        "Clique em *'🎨 Definir Novo Estilo'* ou envie o comando `/modelo`.\n"
-        "Em seguida, envie um arquivo (Word, PDF ou TXT) ou escreva as orientações de formato que você deseja (ex: seções obrigatórias, tom de voz, tabelas).\n\n"
-        "🔹 **Como gerar um relatório?**\n"
-        "Basta colar o texto com seus dados/anotações aqui no chat ou enviar um arquivo com as informações. O bot aplicará a I.A Gemini para criar o relatório segundo o modelo ativo.\n\n"
-        "🔹 **Como pedir ajustes?**\n"
-        "Após a geração do relatório, clique no botão *'✏️ Ajustar / Refinar'* e envie as mudanças que quiser. O documento será atualizado na hora!\n\n"
-        "🔹 **Comandos rápidos**:\n"
-        "• `/start` - Menu Principal\n"
-        "• `/modelo` - Configurar novo modelo de layout\n"
-        "• `/meus_modelos` - Listar e trocar de modelo\n"
-        "• `/ajustar` - Ajustar o último relatório\n"
-        "• `/cancelar` - Cancelar operação atual"
+        "📖 <b>Guia Rápido de Uso</b>:\n\n"
+        "🔹 <b>Como definir o estilo desejado?</b>\n"
+        "Clique em <i>'🎨 Definir Novo Estilo'</i> ou envie o comando /modelo.\n"
+        "Em seguida, envie um arquivo (Word, PDF, TXT ou foto) ou escreva as orientações de formato que você deseja.\n\n"
+        "🔹 <b>Como gerar um relatório?</b>\n"
+        "Clique em <i>'🚀 Novo Relatório'</i> ou envie diretamente:\n"
+        "• 📸 <b>Fotos/Imagens</b>: de notas fiscais, recibos, quadros, tabelas ou anotações (a IA extrai todos os dados com OCR inteligente!)\n"
+        "• ✍️ <b>Texto</b>: rascunhos, números ou anotações coladas no chat\n"
+        "• 📄 <b>Documentos</b>: arquivos Word, PDF, CSV ou TXT\n\n"
+        "🔹 <b>Como pedir ajustes?</b>\n"
+        "Após a geração do relatório, clique no botão <i>'✏️ Ajustar / Refinar'</i> e envie as mudanças que quiser. O documento será atualizado na hora!\n\n"
+        "🔹 <b>Comandos rápidos</b>:\n"
+        "• /start - Menu Principal\n"
+        "• /modelo - Configurar novo modelo de layout\n"
+        "• /meus_modelos - Listar e trocar de modelo\n"
+        "• /ajustar - Ajustar o último relatório\n"
+        "• /cancelar - Cancelar operação atual"
     )
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    msg = update.effective_message
+    if msg:
+        await safe_reply(msg, text, reply_markup=get_main_keyboard())
 
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /cancelar"""
-    user_id = update.effective_user.id
-    database.set_user_state(user_id, STATE_IDLE)
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id:
+        database.set_user_state(user_id, STATE_IDLE)
     context.user_data.clear()
-    await update.message.reply_text(
-        "❌ Operação cancelada. Você está no menu principal.",
-        reply_markup=get_main_keyboard()
-    )
+    msg = update.effective_message
+    if msg:
+        await safe_reply(
+            msg,
+            "❌ <b>Operação cancelada.</b> Você está no menu principal.",
+            reply_markup=get_main_keyboard()
+        )
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gerencia cliques nos botões inline"""
+    """Gerencia cliques nos botões inline com tratamento completo de erros"""
     query = update.callback_query
-    await query.answer()
-
     data = query.data
-    user_id = query.from_user.id
-    database.get_or_create_user(user_id, query.from_user.username, query.from_user.first_name)
+    user = query.from_user
+    user_id = user.id
 
-    if data == "btn_main_menu":
-        database.set_user_state(user_id, STATE_IDLE)
-        active_tpl = database.get_active_template(user_id)
-        tpl_name = active_tpl["name"] if active_tpl else "Nenhum"
-        await query.message.reply_text(
-            f"🏠 **Menu Principal**\n\n📌 Estilo ativo: `{tpl_name}`",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
+    logger.info(f"Botão clicado: '{data}' pelo usuário {user.first_name} (ID: {user_id})")
+    database.get_or_create_user(user_id, user.username, user.first_name)
 
-    elif data == "btn_help":
-        await cmd_ajuda(query, context)
+    try:
+        # Responde o callback imediatamente para cessar o loading visual do botão
+        await query.answer()
 
-    elif data == "btn_view_template":
-        active_tpl = database.get_active_template(user_id)
-        if not active_tpl:
-            await query.message.reply_text("Você ainda não possui nenhum estilo configurado.", reply_markup=get_main_keyboard())
-            return
+        if data == "btn_main_menu":
+            database.set_user_state(user_id, STATE_IDLE)
+            active_tpl = database.get_active_template(user_id)
+            tpl_name = active_tpl["name"] if active_tpl else "Nenhum"
+            text = (
+                f"🏠 <b>Menu Principal</b>\n\n"
+                f"📌 <b>Estilo/Layout Ativo</b>: <code>{html.escape(tpl_name)}</code>\n\n"
+                "Escolha uma opção abaixo:"
+            )
+            await safe_reply(query, text, reply_markup=get_main_keyboard())
 
-        text = (
-            f"📋 **Estilo Ativo Atual**: *{active_tpl['name']}*\n\n"
-            f"**Regras e Diretrizes do Layout:**\n{active_tpl['style_instructions'][:2500]}"
-        )
-        keyboard = [
-            [InlineKeyboardButton("🎨 Criar Novo Modelo", callback_data="btn_set_template")],
-            [InlineKeyboardButton("📁 Escolher Outro Modelo", callback_data="btn_my_templates")],
-            [InlineKeyboardButton("🏠 Menu Principal", callback_data="btn_main_menu")]
-        ]
-        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        elif data == "btn_help":
+            await cmd_ajuda(update, context)
 
-    elif data == "btn_set_template":
-        database.set_user_state(user_id, STATE_WAITING_TEMPLATE)
-        text = (
-            "🎨 **Configuração de Estilo / Layout**\n\n"
-            "Envie agora:\n"
-            "1. Um **arquivo** (.pdf, .docx, .txt) com um modelo/exemplo de relatório que você gosta; OU\n"
-            "2. Uma **mensagem de texto** explicando como você deseja seu relatório (ex: 'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal').\n\n"
-            "A I.A irá analisar o layout e salvar como seu padrão!"
-        )
-        await query.message.reply_text(text, parse_mode="Markdown")
+        elif data == "btn_view_template":
+            active_tpl = database.get_active_template(user_id)
+            if not active_tpl:
+                await safe_reply(query, "⚠️ Você ainda não possui nenhum estilo configurado.", reply_markup=get_main_keyboard())
+                return
 
-    elif data == "btn_my_templates":
-        templates = database.get_user_templates(user_id)
-        if not templates:
-            await query.message.reply_text("Nenhum modelo cadastrado ainda.", reply_markup=get_main_keyboard())
-            return
+            tpl_name = html.escape(active_tpl['name'])
+            guide_snippet = html.escape(active_tpl['style_instructions'][:2500])
+            text = (
+                f"📋 <b>Estilo Ativo Atual</b>: <b>{tpl_name}</b>\n\n"
+                f"<b>Regras e Diretrizes do Layout:</b>\n"
+                f"<code>{guide_snippet}</code>"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🎨 Criar Novo Modelo", callback_data="btn_set_template")],
+                [InlineKeyboardButton("📁 Escolher Outro Modelo", callback_data="btn_my_templates")],
+                [InlineKeyboardButton("🏠 Menu Principal", callback_data="btn_main_menu")]
+            ]
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-        active_tpl = database.get_active_template(user_id)
-        active_id = active_tpl["id"] if active_tpl else None
+        elif data == "btn_set_template":
+            database.set_user_state(user_id, STATE_WAITING_TEMPLATE)
+            text = (
+                "🎨 <b>Configuração de Estilo / Layout</b>\n\n"
+                "Envie agora:\n"
+                "1. Uma <b>foto ou imagem</b> de um modelo de relatório que você gosta;\n"
+                "2. Um <b>arquivo</b> (.pdf, .docx, .txt) com um exemplo de layout; OU\n"
+                "3. Uma <b>mensagem de texto</b> explicando como você deseja seu relatório (ex: <i>'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal'</i>).\n\n"
+                "🤖 A I.A analisará o layout e salvará como seu padrão!"
+            )
+            keyboard = [
+                [InlineKeyboardButton("❌ Cancelar / Menu Principal", callback_data="btn_main_menu")]
+            ]
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-        keyboard = []
-        for tpl in templates:
-            prefix = "✅ " if tpl["id"] == active_id else "⚪ "
-            keyboard.append([InlineKeyboardButton(f"{prefix}{tpl['name']}", callback_data=f"sel_tpl_{tpl['id']}")])
-        
-        keyboard.append([InlineKeyboardButton("➕ Adicionar Novo Estilo", callback_data="btn_set_template")])
-        keyboard.append([InlineKeyboardButton("🏠 Voltar", callback_data="btn_main_menu")])
+        elif data == "btn_my_templates":
+            templates = database.get_user_templates(user_id)
+            if not templates:
+                await safe_reply(query, "Nenhum modelo cadastrado ainda.", reply_markup=get_main_keyboard())
+                return
 
-        await query.message.reply_text(
-            "📁 **Seus Modelos de Relatório Salvos**:\nClique em um modelo para torná-lo ativo:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+            active_tpl = database.get_active_template(user_id)
+            active_id = active_tpl["id"] if active_tpl else None
 
-    elif data.startswith("sel_tpl_"):
-        tpl_id = int(data.replace("sel_tpl_", ""))
-        database.set_active_template(user_id, tpl_id)
-        tpl = database.get_template_by_id(tpl_id)
-        tpl_name = tpl["name"] if tpl else "Modelo"
-        await query.message.reply_text(
-            f"✅ **Modelo Ativado**: `{tpl_name}`!\n\nAgora os seus próximos relatórios serão estruturados de acordo com este estilo.",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
+            keyboard = []
+            for tpl in templates:
+                prefix = "✅ " if tpl["id"] == active_id else "⚪ "
+                keyboard.append([InlineKeyboardButton(f"{prefix}{tpl['name']}", callback_data=f"sel_tpl_{tpl['id']}")])
+            
+            keyboard.append([InlineKeyboardButton("➕ Adicionar Novo Estilo", callback_data="btn_set_template")])
+            keyboard.append([InlineKeyboardButton("🏠 Voltar", callback_data="btn_main_menu")])
 
-    elif data == "btn_new_report":
-        database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
-        active_tpl = database.get_active_template(user_id)
-        tpl_name = active_tpl["name"] if active_tpl else "Padrão"
-        await query.message.reply_text(
-            f"🚀 **Criar Novo Relatório** (Modelo: `{tpl_name}`)\n\n"
-            "Envie agora o rascunho, anotações, dados ou envie um arquivo (.txt, .pdf, .docx) com as informações do relatório.\n"
-            "A I.A processará os dados e criará os arquivos Word e PDF automaticamente!",
-            parse_mode="Markdown"
-        )
+            text = "📁 <b>Seus Modelos de Relatório Salvos:</b>\nClique em um modelo para torná-lo ativo:"
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data == "btn_adjust":
-        report = database.get_latest_report(user_id)
-        if not report:
-            await query.message.reply_text("Nenhum relatório encontrado para ajustar. Crie um relatório primeiro!", reply_markup=get_main_keyboard())
-            return
-        database.set_user_state(user_id, STATE_WAITING_ADJUSTMENT)
-        await query.message.reply_text(
-            "✏️ **Solicitar Ajustes no Relatório**\n\n"
-            "Descreva o que deseja mudar (ex: 'Deixe o texto mais resumido', 'Adicione uma coluna de Responsável na tabela', 'Remova a seção de riscos').",
-            parse_mode="Markdown"
-        )
+        elif data.startswith("sel_tpl_"):
+            tpl_id = int(data.replace("sel_tpl_", ""))
+            database.set_active_template(user_id, tpl_id)
+            tpl = database.get_template_by_id(tpl_id)
+            tpl_name = tpl["name"] if tpl else "Modelo"
+            await query.answer(f"Modelo ativado: {tpl_name}!", show_alert=False)
+            text = (
+                f"✅ <b>Modelo Ativado</b>: <code>{html.escape(tpl_name)}</code>!\n\n"
+                "Agora os seus próximos relatórios serão estruturados de acordo com este estilo."
+            )
+            await safe_reply(query, text, reply_markup=get_main_keyboard())
 
-    elif data == "btn_dl_docx":
-        report = database.get_latest_report(user_id)
-        if report and report["docx_path"] and Path(report["docx_path"]).exists():
-            with open(report["docx_path"], "rb") as f:
-                await query.message.reply_document(f, filename=Path(report["docx_path"]).name, caption="📄 Relatório em Microsoft Word (.docx)")
-        else:
-            await query.message.reply_text("Arquivo DOCX não disponível. Gere um relatório primeiro!")
+        elif data == "btn_new_report":
+            database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
+            active_tpl = database.get_active_template(user_id)
+            tpl_name = active_tpl["name"] if active_tpl else "Padrão"
+            text = (
+                f"🚀 <b>Criar Novo Relatório</b> (Modelo Ativo: <code>{html.escape(tpl_name)}</code>)\n\n"
+                "Você pode enviar suas informações de várias formas:\n\n"
+                "1. 📸 <b>Fotos / Imagens</b>: tire fotos de notas fiscais, recibos, quadros, tabelas ou anotações (a I.A extrai os dados e anexa as fotos no documento!);\n"
+                "2. ✍️ <b>Digitar ou colar</b> seus dados, anotações ou rascunho aqui no chat;\n"
+                "3. 📄 <b>Enviar um arquivo</b> (.pdf, .docx, .txt, .csv) com as informações;\n"
+                "4. 🧪 <b>Testar agora</b> clicando no botão abaixo para gerar um relatório de demonstração em tempo real!\n\n"
+                "<i>Aguardando seus dados ou fotos...</i>"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🧪 Gerar Exemplo de Demonstração", callback_data="btn_example_report")],
+                [InlineKeyboardButton("❌ Cancelar / Menu Principal", callback_data="btn_main_menu")]
+            ]
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data == "btn_dl_pdf":
-        report = database.get_latest_report(user_id)
-        if report and report["pdf_path"] and Path(report["pdf_path"]).exists():
-            with open(report["pdf_path"], "rb") as f:
-                await query.message.reply_document(f, filename=Path(report["pdf_path"]).name, caption="📑 Relatório em PDF")
-        else:
-            await query.message.reply_text("Arquivo PDF não disponível. Gere um relatório primeiro!")
+        elif data == "btn_example_report":
+            await query.answer("Gerando relatório de exemplo...", show_alert=False)
+            sample_data = (
+                "Relatório de Desempenho Operacional e Comercial\n"
+                "Período: Semana 36 - 2026\n"
+                "Responsável: Coordenação Geral\n\n"
+                "Resultados Principais:\n"
+                "- Faturamento da semana: R$ 184.500,00 (Meta: R$ 170.000,00 - 108.5% atingido)\n"
+                "- Novos clientes cadastrados: 43\n"
+                "- Taxa de conversão de leads: 14.2%\n"
+                "- Chamados de suporte atendidos: 128 (Tempo Médio de Resposta: 12 minutos)\n"
+                "- Índice de Satisfação (CSAT): 98.4%\n\n"
+                "Destaques da Operação:\n"
+                "- Conclusão da homologação do novo gateway de pagamentos com redução de 0.8% nas taxas.\n"
+                "- Treinamento da equipe de vendas no novo catálogo de produtos.\n\n"
+                "Ações e Próximos Passos:\n"
+                "- Implementar campanha de retenção para contas inativas até 15/09 (Responsável: Amanda).\n"
+                "- Finalizar testes de carga da infraestrutura de servidores até 18/09 (Responsável: Rodrigo)."
+            )
+            await process_report_generation(query.message, context, user_id, raw_text=sample_data)
 
-    elif data == "btn_dl_txt":
-        report = database.get_latest_report(user_id)
-        if report and report["txt_path"] and Path(report["txt_path"]).exists():
-            with open(report["txt_path"], "rb") as f:
-                await query.message.reply_document(f, filename=Path(report["txt_path"]).name, caption="📝 Relatório em Texto Puro (.txt)")
-        else:
-            await query.message.reply_text("Arquivo TXT não disponível.")
+        elif data == "btn_adjust":
+            report = database.get_latest_report(user_id)
+            if not report:
+                await query.answer("Nenhum relatório encontrado.", show_alert=True)
+                await safe_reply(query, "⚠️ Nenhum relatório encontrado para ajustar. Crie um relatório primeiro!", reply_markup=get_main_keyboard())
+                return
+            database.set_user_state(user_id, STATE_WAITING_ADJUSTMENT)
+            text = (
+                "✏️ <b>Solicitar Ajustes no Relatório</b>\n\n"
+                "Descreva o que deseja mudar. Exemplos:\n"
+                "• <i>'Deixe o texto mais resumido e objetivo'</i>\n"
+                "• <i>'Adicione uma coluna de Responsável na tabela'</i>\n"
+                "• <i>'Mude o tom para executivo formal'</i>\n\n"
+                "Envie sua mensagem com as correções:"
+            )
+            keyboard = [
+                [InlineKeyboardButton("❌ Cancelar Ajuste", callback_data="btn_main_menu")]
+            ]
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data.startswith("act_gen_"):
-        # Usuário clicou em 'Gerar Relatório a partir deste arquivo'
-        file_path_str = context.user_data.get("last_uploaded_file")
-        if not file_path_str or not Path(file_path_str).exists():
-            await query.message.reply_text("Arquivo não encontrado. Por favor, envie novamente.")
-            return
-        await process_report_generation(query.message, context, user_id, file_path=Path(file_path_str))
+        elif data == "btn_dl_docx":
+            report = database.get_latest_report(user_id)
+            if report and report["docx_path"] and Path(report["docx_path"]).exists():
+                await query.answer("Enviando documento Word...")
+                with open(report["docx_path"], "rb") as f:
+                    await query.message.reply_document(f, filename=Path(report["docx_path"]).name, caption="📄 Relatório em Microsoft Word (.docx)")
+            else:
+                await query.answer("Arquivo DOCX não disponível.", show_alert=True)
+                await safe_reply(query, "⚠️ Arquivo DOCX não disponível. Gere um relatório primeiro!", reply_markup=get_main_keyboard())
 
-    elif data.startswith("act_tpl_"):
-        # Usuário clicou em 'Usar este arquivo como Modelo de Estilo'
-        file_path_str = context.user_data.get("last_uploaded_file")
-        if not file_path_str or not Path(file_path_str).exists():
-            await query.message.reply_text("Arquivo não encontrado. Por favor, envie novamente.")
-            return
-        await process_template_creation(query.message, context, user_id, file_path=Path(file_path_str))
+        elif data == "btn_dl_pdf":
+            report = database.get_latest_report(user_id)
+            if report and report["pdf_path"] and Path(report["pdf_path"]).exists():
+                await query.answer("Enviando PDF...")
+                with open(report["pdf_path"], "rb") as f:
+                    await query.message.reply_document(f, filename=Path(report["pdf_path"]).name, caption="📑 Relatório em PDF")
+            else:
+                await query.answer("Arquivo PDF não disponível.", show_alert=True)
+                await safe_reply(query, "⚠️ Arquivo PDF não disponível. Gere um relatório primeiro!", reply_markup=get_main_keyboard())
+
+        elif data == "btn_dl_txt":
+            report = database.get_latest_report(user_id)
+            if report and report["txt_path"] and Path(report["txt_path"]).exists():
+                await query.answer("Enviando arquivo TXT...")
+                with open(report["txt_path"], "rb") as f:
+                    await query.message.reply_document(f, filename=Path(report["txt_path"]).name, caption="📝 Relatório em Texto Puro (.txt)")
+            else:
+                await query.answer("Arquivo TXT não disponível.", show_alert=True)
+                await safe_reply(query, "⚠️ Arquivo TXT não disponível. Gere um relatório primeiro!", reply_markup=get_main_keyboard())
+
+        elif data.startswith("act_gen_"):
+            file_id = data.replace("act_gen_", "")
+            file_path = None
+            file_path_str = context.user_data.get("last_uploaded_file") or context.bot_data.get(f"file_{file_id}")
+            if file_path_str and Path(file_path_str).exists():
+                file_path = Path(file_path_str)
+            else:
+                try:
+                    status_rec = await query.message.reply_text("📥 Recuperando arquivo enviado...")
+                    tg_file = await context.bot.get_file(file_id)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = f"{timestamp}_recuperado"
+                    file_path = config.UPLOADS_DIR / safe_name
+                    await tg_file.download_to_drive(str(file_path))
+                    await status_rec.delete()
+                except Exception as e:
+                    logger.error(f"Erro ao recuperar arquivo: {e}")
+
+            if not file_path or not file_path.exists():
+                await query.answer("Arquivo não encontrado.", show_alert=True)
+                await safe_reply(query, "⚠️ Arquivo não encontrado. Por favor, envie novamente o arquivo no chat.", reply_markup=get_main_keyboard())
+                return
+
+            await query.answer("Iniciando geração do relatório...")
+            await process_report_generation(query.message, context, user_id, file_path=file_path)
+
+        elif data.startswith("act_tpl_"):
+            file_id = data.replace("act_tpl_", "")
+            file_path = None
+            file_path_str = context.user_data.get("last_uploaded_file") or context.bot_data.get(f"file_{file_id}")
+            if file_path_str and Path(file_path_str).exists():
+                file_path = Path(file_path_str)
+            else:
+                try:
+                    status_rec = await query.message.reply_text("📥 Recuperando arquivo de modelo...")
+                    tg_file = await context.bot.get_file(file_id)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = f"{timestamp}_modelo_recuperado"
+                    file_path = config.UPLOADS_DIR / safe_name
+                    await tg_file.download_to_drive(str(file_path))
+                    await status_rec.delete()
+                except Exception as e:
+                    logger.error(f"Erro ao recuperar arquivo de modelo: {e}")
+
+            if not file_path or not file_path.exists():
+                await query.answer("Arquivo não encontrado.", show_alert=True)
+                await safe_reply(query, "⚠️ Arquivo não encontrado. Por favor, envie novamente o arquivo no chat.", reply_markup=get_main_keyboard())
+                return
+
+            await query.answer("Analisando estilo do modelo...")
+            await process_template_creation(query.message, context, user_id, file_path=file_path)
+
+        elif data.startswith("act_pgen_"):
+            file_id = data.replace("act_pgen_", "")
+            photo_path = None
+            photo_path_str = context.user_data.get("last_uploaded_photo") or context.bot_data.get(f"photo_{file_id}") or context.bot_data.get(f"file_{file_id}")
+            if photo_path_str and Path(photo_path_str).exists():
+                photo_path = Path(photo_path_str)
+            else:
+                try:
+                    status_rec = await query.message.reply_text("📥 Recuperando foto enviada...")
+                    tg_file = await context.bot.get_file(file_id)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = f"{timestamp}_photo_{file_id}.jpg"
+                    photo_path = config.UPLOADS_DIR / safe_name
+                    await tg_file.download_to_drive(str(photo_path))
+                    await status_rec.delete()
+                except Exception as e:
+                    logger.error(f"Erro ao recuperar foto: {e}")
+
+            if not photo_path or not photo_path.exists():
+                await query.answer("Foto não encontrada.", show_alert=True)
+                await safe_reply(query, "⚠️ Foto não encontrada. Por favor, envie novamente a foto no chat.", reply_markup=get_main_keyboard())
+                return
+
+            await query.answer("Iniciando extração de dados e relatório...")
+            await process_report_generation(query.message, context, user_id, image_paths=[photo_path])
+
+        elif data.startswith("act_ptpl_"):
+            file_id = data.replace("act_ptpl_", "")
+            photo_path = None
+            photo_path_str = context.user_data.get("last_uploaded_photo") or context.bot_data.get(f"photo_{file_id}") or context.bot_data.get(f"file_{file_id}")
+            if photo_path_str and Path(photo_path_str).exists():
+                photo_path = Path(photo_path_str)
+            else:
+                try:
+                    status_rec = await query.message.reply_text("📥 Recuperando foto enviada...")
+                    tg_file = await context.bot.get_file(file_id)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = f"{timestamp}_photo_{file_id}.jpg"
+                    photo_path = config.UPLOADS_DIR / safe_name
+                    await tg_file.download_to_drive(str(photo_path))
+                    await status_rec.delete()
+                except Exception as e:
+                    logger.error(f"Erro ao recuperar foto: {e}")
+
+            if not photo_path or not photo_path.exists():
+                await query.answer("Foto não encontrada.", show_alert=True)
+                await safe_reply(query, "⚠️ Foto não encontrada. Por favor, envie novamente a foto no chat.", reply_markup=get_main_keyboard())
+                return
+
+            await query.answer("Analisando estilo da foto enviada...")
+            await process_template_creation(query.message, context, user_id, image_paths=[photo_path])
+
+    except Exception as e:
+        logger.error(f"Erro ao processar callback '{data}': {e}", exc_info=True)
+        try:
+            await query.answer("Ocorreu um erro ao processar esta ação.", show_alert=True)
+            await safe_reply(query, f"❌ Ocorreu um erro ao processar a ação: {e}", reply_markup=get_main_keyboard())
+        except Exception:
+            pass
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa mensagens de texto enviadas pelo usuário"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    db_user = database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
 
     if current_state == STATE_WAITING_TEMPLATE:
@@ -310,12 +485,75 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Por padrão no estado normal (ou WAITING_REPORT_INPUT), se o usuário enviar texto, geramos o relatório!
         await process_report_generation(update.message, context, user_id, raw_text=text)
 
-async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processa documentos enviados (.docx, .pdf, .txt, etc.)"""
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa fotos enviadas pelo usuário (notas fiscais, recibos, fotos de relatórios, etc.)"""
     user_id = update.effective_user.id
-    db_user = database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    current_state = database.get_user_state(user_id)
+    
+    # Foto de maior resolução
+    photo = update.message.photo[-1]
+    caption = (update.message.caption or "").strip()
+    
+    status_msg = await update.message.reply_text("📥 Recebendo foto...")
+    file = await context.bot.get_file(photo.file_id)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = f"{timestamp}_photo_{photo.file_unique_id}.jpg"
+    local_path = config.UPLOADS_DIR / safe_name
+    await file.download_to_drive(str(local_path))
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    context.user_data["last_uploaded_photo"] = str(local_path)
+    context.user_data["last_uploaded_file"] = str(local_path)
+    context.bot_data[f"photo_{photo.file_id}"] = str(local_path)
+    context.bot_data[f"file_{photo.file_id}"] = str(local_path)
+
+    # Se estava esperando template explicitamente
+    if current_state == STATE_WAITING_TEMPLATE:
+        await process_template_creation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
+        return
+
+    # Se estava esperando entrada de relatório explicitamente
+    if current_state == STATE_WAITING_REPORT_INPUT:
+        await process_report_generation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
+        return
+
+    # Se estava esperando ajuste
+    if current_state == STATE_WAITING_ADJUSTMENT:
+        await process_report_adjustment(update.message, context, user_id, feedback_text=caption, image_paths=[local_path])
+        return
+
+    # Se enviou a foto diretamente sem comando prévio
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Extrair Dados e Gerar Relatório", callback_data=f"act_pgen_{photo.file_id}")
+        ],
+        [
+            InlineKeyboardButton("🎨 Usar como Modelo de Estilo", callback_data=f"act_ptpl_{photo.file_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Cancelar", callback_data="btn_main_menu")
+        ]
+    ]
+    caption_text = f"\nLegenda informada: <i>'{html.escape(caption)}'</i>\n" if caption else ""
+    text = (
+        f"📸 <b>Foto recebida com sucesso!</b>\n{caption_text}\n"
+        "A I.A multimodal Gemini pode extrair notas fiscais, recibos, dados de tabelas e anotações diretamente desta foto.\n\n"
+        "Como você deseja utilizá-la?"
+    )
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa documentos enviados (.docx, .pdf, .txt, fotos como arquivo, etc.)"""
+    user_id = update.effective_user.id
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
     doc = update.message.document
+    caption = (update.message.caption or "").strip()
 
     # Faz o download do arquivo
     status_msg = await update.message.reply_text("📥 Recebendo arquivo...")
@@ -325,41 +563,70 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     safe_name = f"{timestamp}_{doc.file_name}"
     local_path = config.UPLOADS_DIR / safe_name
     await file.download_to_drive(str(local_path))
-    await status_msg.delete()
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    # Verifica se o documento é uma imagem (.png, .jpg, etc.)
+    mime = getattr(doc, "mime_type", "") or ""
+    file_name_lower = (doc.file_name or "").lower()
+    is_image = mime.startswith("image/") or file_name_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"))
 
     context.user_data["last_uploaded_file"] = str(local_path)
+    context.bot_data[f"file_{doc.file_id}"] = str(local_path)
+    if is_image:
+        context.user_data["last_uploaded_photo"] = str(local_path)
+        context.bot_data[f"photo_{doc.file_id}"] = str(local_path)
 
     # Se estava esperando template explicitamente
     if current_state == STATE_WAITING_TEMPLATE:
-        await process_template_creation(update.message, context, user_id, file_path=local_path)
+        if is_image:
+            await process_template_creation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
+        else:
+            await process_template_creation(update.message, context, user_id, file_path=local_path, raw_text=caption)
         return
 
     # Se estava esperando entrada de relatório explicitamente
     if current_state == STATE_WAITING_REPORT_INPUT:
-        await process_report_generation(update.message, context, user_id, file_path=local_path)
+        if is_image:
+            await process_report_generation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
+        else:
+            await process_report_generation(update.message, context, user_id, file_path=local_path, raw_text=caption)
+        return
+
+    # Se estava esperando ajuste explicitamente
+    if current_state == STATE_WAITING_ADJUSTMENT:
+        if is_image:
+            await process_report_adjustment(update.message, context, user_id, feedback_text=caption, image_paths=[local_path])
         return
 
     # Se enviou o arquivo diretamente sem comando prévio, pergunta como deseja usar:
+    btn_report_text = "📊 Extrair Dados e Gerar Relatório" if is_image else "📊 Gerar Relatório com este arquivo"
+    btn_action = f"act_pgen_{doc.file_id}" if is_image else f"act_gen_{doc.file_id}"
+    btn_tpl_action = f"act_ptpl_{doc.file_id}" if is_image else f"act_tpl_{doc.file_id}"
+
     keyboard = [
         [
-            InlineKeyboardButton("📊 Gerar Relatório com este arquivo", callback_data=f"act_gen_{doc.file_id}")
+            InlineKeyboardButton(btn_report_text, callback_data=btn_action)
         ],
         [
-            InlineKeyboardButton("🎨 Usar como Novo Modelo / Estilo", callback_data=f"act_tpl_{doc.file_id}")
+            InlineKeyboardButton("🎨 Usar como Novo Modelo / Estilo", callback_data=btn_tpl_action)
         ],
         [
             InlineKeyboardButton("❌ Cancelar", callback_data="btn_main_menu")
         ]
     ]
-    await update.message.reply_text(
-        f"📄 Recebi o arquivo: `{doc.file_name}`\n\nComo você deseja utilizá-lo?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    doc_escaped = html.escape(doc.file_name or "arquivo")
+    emoji = "📸" if is_image else "📄"
+    text = f"{emoji} Recebi o arquivo: <code>{doc_escaped}</code>\n\nComo você deseja utilizá-lo?"
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
-                                    file_path: Optional[Path] = None, raw_text: Optional[str] = None):
-    """Cria e salva um novo modelo de estilo a partir de arquivo ou texto"""
+                                    file_path: Optional[Path] = None,
+                                    raw_text: Optional[str] = None,
+                                    image_paths: Optional[List[Path]] = None):
+    """Cria e salva um novo modelo de estilo a partir de arquivo, foto ou texto"""
     status_msg = await message.reply_text("🤖 A I.A Gemini está analisando o layout e a estrutura do seu modelo...")
 
     try:
@@ -369,34 +636,49 @@ async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE,
         elif raw_text:
             sample_content = raw_text
 
-        if not sample_content.strip():
-            await status_msg.edit_text("⚠️ Não foi possível encontrar texto ou conteúdo para analisar.")
+        if not sample_content.strip() and not image_paths:
+            await status_msg.edit_text("⚠️ Não foi possível encontrar texto ou imagem para analisar.")
             return
 
-        result = gemini_service.analyze_and_extract_style(sample_content)
+        result = gemini_service.analyze_and_extract_style(
+            sample_text=sample_content,
+            image_paths=image_paths,
+            user_hints=raw_text or ""
+        )
         tpl_name = result["name"]
         style_guide = result["style_instructions"]
 
-        tpl_id = database.save_template(user_id, tpl_name, style_guide, sample_content[:3000])
+        database.save_template(user_id, tpl_name, style_guide, (sample_content or "Modelo baseado em imagem")[:3000])
         database.set_user_state(user_id, STATE_IDLE)
 
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        tpl_escaped = html.escape(tpl_name)
+        guide_escaped = html.escape(style_guide[:1200])
         response_text = (
-            f"✅ **Novo Modelo Salvo e Ativado com Sucesso!**\n\n"
-            f"🏷️ **Nome**: `{tpl_name}`\n\n"
-            f"📋 **Estrutura identificada pela I.A:**\n{style_guide[:1200]}\n\n"
-            "Agora qualquer dado ou rascunho que você enviar será formatado neste padrão!"
+            f"✅ <b>Novo Modelo Salvo e Ativado com Sucesso!</b>\n\n"
+            f"🏷️ <b>Nome</b>: <code>{tpl_escaped}</code>\n\n"
+            f"📋 <b>Estrutura identificada pela I.A:</b>\n<code>{guide_escaped}</code>\n\n"
+            "Agora qualquer dado, texto ou foto que você enviar será formatado neste padrão!"
         )
-        await message.reply_text(response_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        await safe_reply(message, response_text, reply_markup=get_main_keyboard())
 
     except Exception as e:
         logger.error(f"Erro ao processar modelo: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Ocorreu um erro ao processar o modelo: {e}\n\nVerifique se sua chave `GEMINI_API_KEY` está configurada corretamente no `.env`.")
+        await status_msg.edit_text(
+            f"❌ Ocorreu um erro ao processar o modelo: {e}\n\nVerifique se sua chave GEMINI_API_KEY está configurada no .env.",
+            reply_markup=get_main_keyboard()
+        )
 
 async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
-                                    file_path: Optional[Path] = None, raw_text: Optional[str] = None):
-    """Gera o relatório com Gemini e cria os arquivos DOCX, PDF e TXT"""
-    status_msg = await message.reply_text("🧠 **Gerando seu relatório com a I.A Gemini...**\nAguarde alguns instantes.")
+                                    file_path: Optional[Path] = None,
+                                    raw_text: Optional[str] = None,
+                                    image_paths: Optional[List[Path]] = None):
+    """Gera o relatório com Gemini e cria os arquivos DOCX, PDF e TXT, incorporando fotos/anexos"""
+    status_msg = await message.reply_text("🧠 <b>Gerando seu relatório com a I.A Gemini...</b>\nAguarde alguns instantes.", parse_mode="HTML")
 
     try:
         content_to_process = ""
@@ -405,16 +687,23 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
         elif raw_text:
             content_to_process = raw_text
 
-        if not content_to_process.strip():
+        if not content_to_process.strip() and not image_paths:
             await status_msg.edit_text("⚠️ Não há conteúdo ou dados para gerar o relatório.")
             return
+
+        if not content_to_process.strip():
+            content_to_process = "Extraia detalhadamente todos os dados, tabelas, recibos, números e informações contidas na(s) foto(s)/imagem(ns) anexa(s) e gere um relatório executivo completo."
 
         active_tpl = database.get_active_template(user_id)
         if not active_tpl:
             active_tpl = {"style_instructions": "Estrutura profissional padrão com Título, Resumo, Indicadores e Conclusão."}
 
-        # Gera o relatório em Markdown com Gemini
-        generated_md = gemini_service.generate_report(content_to_process, active_tpl["style_instructions"])
+        # Gera o relatório em Markdown com Gemini passando image_paths
+        generated_md = gemini_service.generate_report(
+            raw_content=content_to_process,
+            style_instructions=active_tpl["style_instructions"],
+            image_paths=image_paths
+        )
 
         # Identifica o título do relatório (primeira linha com #)
         title = "Relatório Executivo"
@@ -426,18 +715,20 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
         # Cria arquivos no disco
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         clean_title = re.sub(r'[^a-zA-Z0-9_-]', '_', title)[:30]
+        if not clean_title:
+            clean_title = f"Relatorio_{timestamp}"
         base_name = f"{clean_title}_{timestamp}"
 
         docx_path = config.OUTPUTS_DIR / f"{base_name}.docx"
         pdf_path = config.OUTPUTS_DIR / f"{base_name}.pdf"
         txt_path = config.OUTPUTS_DIR / f"{base_name}.txt"
 
-        doc_generator.create_docx_report(generated_md, docx_path, title_hint=title)
-        doc_generator.create_pdf_report(generated_md, pdf_path, title_hint=title)
+        doc_generator.create_docx_report(generated_md, docx_path, title_hint=title, image_paths=image_paths)
+        doc_generator.create_pdf_report(generated_md, pdf_path, title_hint=title, image_paths=image_paths)
         doc_generator.create_txt_report(generated_md, txt_path)
 
         # Salva no banco de dados
-        report_id = database.save_report(
+        database.save_report(
             user_id=user_id,
             template_id=active_tpl.get("id"),
             title=title,
@@ -449,42 +740,64 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
         )
 
         database.set_user_state(user_id, STATE_IDLE)
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
         # Envia os documentos gerados diretamente para o usuário
         with open(docx_path, "rb") as f_docx:
-            await message.reply_document(f_docx, filename=f"{clean_title}.docx", caption=f"📄 **{title}** (.docx)")
+            await message.reply_document(f_docx, filename=f"{clean_title}.docx", caption=f"📄 {title} (.docx)")
 
         with open(pdf_path, "rb") as f_pdf:
-            await message.reply_document(f_pdf, filename=f"{clean_title}.pdf", caption=f"📑 **{title}** (.pdf)")
+            await message.reply_document(f_pdf, filename=f"{clean_title}.pdf", caption=f"📑 {title} (.pdf)")
 
-        # Envia prévia do texto e opções de ação
+        # Envia prévia e opções de ação
+        title_escaped = html.escape(title)
+        img_badge = "\n<i>📸 Fotos e anexos foram incluídos ao final do documento!</i>" if image_paths else ""
         preview_text = (
-            f"✨ **Relatório Gerado com Sucesso!**\n\n"
-            f"📌 **{title}**\n\n"
-            f"Você pode baixar os arquivos acima ou solicitar alterações instantâneas clicando em *Ajustar / Refinar*."
+            f"✨ <b>Relatório Gerado com Sucesso!</b>\n\n"
+            f"📌 <b>{title_escaped}</b>{img_badge}\n\n"
+            "Você pode baixar os arquivos acima ou solicitar alterações instantâneas clicando em <b>Ajustar / Refinar</b> abaixo:"
         )
-        await message.reply_text(preview_text, reply_markup=get_report_actions_keyboard(), parse_mode="Markdown")
+        await safe_reply(message, preview_text, reply_markup=get_report_actions_keyboard())
 
     except Exception as e:
         logger.error(f"Erro ao gerar relatório: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Ocorreu um erro ao gerar o relatório: {e}\n\nVerifique as chaves e modelos configurados.")
+        try:
+            await status_msg.edit_text(
+                f"❌ Ocorreu um erro ao gerar o relatório: {e}\n\nVerifique as chaves e tente novamente.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception:
+            await safe_reply(message, f"❌ Erro ao gerar relatório: {e}", reply_markup=get_main_keyboard())
 
-async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE, user_id: int, feedback_text: str):
-    """Aplica ajustes ao último relatório gerado"""
-    status_msg = await message.reply_text("🔄 **Aplicando seus ajustes ao relatório...**")
+async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
+                                    feedback_text: Optional[str] = None,
+                                    image_paths: Optional[List[Path]] = None):
+    """Aplica ajustes ao último relatório gerado, aceitando instruções em texto ou fotos adicionais"""
+    status_msg = await message.reply_text("🔄 <b>Aplicando seus ajustes ao relatório...</b>", parse_mode="HTML")
 
     try:
         report = database.get_latest_report(user_id)
         if not report:
-            await status_msg.edit_text("Nenhum relatório encontrado para ajustar.")
+            await status_msg.edit_text("Nenhum relatório encontrado para ajustar.", reply_markup=get_main_keyboard())
             return
 
         active_tpl = database.get_active_template(user_id)
         style_guide = active_tpl["style_instructions"] if active_tpl else ""
 
+        fb = feedback_text or ""
+        if not fb and image_paths:
+            fb = "Incorpore as novas informações e dados visíveis na(s) imagem(ns) anexa(s)."
+
         # Refina com Gemini
-        updated_md = gemini_service.refine_report(report["generated_content"], feedback_text, style_guide)
+        updated_md = gemini_service.refine_report(
+            current_report=report["generated_content"],
+            feedback=fb,
+            style_instructions=style_guide,
+            image_paths=image_paths
+        )
 
         # Atualiza arquivos
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -495,14 +808,16 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
                 break
 
         clean_title = re.sub(r'[^a-zA-Z0-9_-]', '_', title)[:30]
+        if not clean_title:
+            clean_title = f"Relatorio_rev_{timestamp}"
         base_name = f"{clean_title}_rev_{timestamp}"
 
         docx_path = config.OUTPUTS_DIR / f"{base_name}.docx"
         pdf_path = config.OUTPUTS_DIR / f"{base_name}.pdf"
         txt_path = config.OUTPUTS_DIR / f"{base_name}.txt"
 
-        doc_generator.create_docx_report(updated_md, docx_path, title_hint=title)
-        doc_generator.create_pdf_report(updated_md, pdf_path, title_hint=title)
+        doc_generator.create_docx_report(updated_md, docx_path, title_hint=title, image_paths=image_paths)
+        doc_generator.create_pdf_report(updated_md, pdf_path, title_hint=title, image_paths=image_paths)
         doc_generator.create_txt_report(updated_md, txt_path)
 
         database.update_latest_report(
@@ -514,24 +829,30 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
         )
 
         database.set_user_state(user_id, STATE_IDLE)
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
         # Envia os documentos atualizados
         with open(docx_path, "rb") as f_docx:
-            await message.reply_document(f_docx, filename=f"{clean_title}.docx", caption=f"📄 **{title}** (Atualizado)")
+            await message.reply_document(f_docx, filename=f"{clean_title}.docx", caption=f"📄 {title} (Atualizado)")
 
         with open(pdf_path, "rb") as f_pdf:
-            await message.reply_document(f_pdf, filename=f"{clean_title}.pdf", caption=f"📑 **{title}** (Atualizado)")
+            await message.reply_document(f_pdf, filename=f"{clean_title}.pdf", caption=f"📑 {title} (Atualizado)")
 
-        await message.reply_text(
-            "✅ **Relatório atualizado com base nos seus ajustes!**",
-            reply_markup=get_report_actions_keyboard(),
-            parse_mode="Markdown"
+        await safe_reply(
+            message,
+            "✅ <b>Relatório atualizado com base nos seus ajustes!</b>",
+            reply_markup=get_report_actions_keyboard()
         )
 
     except Exception as e:
         logger.error(f"Erro ao ajustar relatório: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Ocorreu um erro ao ajustar o relatório: {e}")
+        try:
+            await status_msg.edit_text(f"❌ Ocorreu um erro ao ajustar o relatório: {e}", reply_markup=get_main_keyboard())
+        except Exception:
+            await safe_reply(message, f"❌ Erro ao ajustar relatório: {e}", reply_markup=get_main_keyboard())
 
 async def cmd_modelo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /modelo"""
@@ -539,13 +860,17 @@ async def cmd_modelo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     database.set_user_state(user_id, STATE_WAITING_TEMPLATE)
     text = (
-        "🎨 **Configuração de Estilo / Layout**\n\n"
+        "🎨 <b>Configuração de Estilo / Layout</b>\n\n"
         "Envie agora:\n"
-        "1. Um **arquivo** (.pdf, .docx, .txt) com um modelo/exemplo de relatório que você gosta; OU\n"
-        "2. Uma **mensagem de texto** explicando como você deseja seu relatório (ex: 'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal').\n\n"
-        "A I.A irá analisar o layout e salvar como seu padrão!"
+        "1. Uma <b>foto ou imagem</b> de um modelo de relatório que você gosta;\n"
+        "2. Um <b>arquivo</b> (.pdf, .docx, .txt) com um modelo/exemplo; OU\n"
+        "3. Uma <b>mensagem de texto</b> explicando como você deseja seu relatório (ex: <i>'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal'</i>).\n\n"
+        "🤖 A I.A analisará o layout e salvará como seu padrão!"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    keyboard = [
+        [InlineKeyboardButton("❌ Cancelar / Menu Principal", callback_data="btn_main_menu")]
+    ]
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def cmd_meus_modelos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /meus_modelos"""
@@ -553,7 +878,7 @@ async def cmd_meus_modelos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     templates = database.get_user_templates(user_id)
     if not templates:
-        await update.message.reply_text("Nenhum modelo cadastrado ainda.", reply_markup=get_main_keyboard())
+        await safe_reply(update.message, "Nenhum modelo cadastrado ainda.", reply_markup=get_main_keyboard())
         return
 
     active_tpl = database.get_active_template(user_id)
@@ -567,11 +892,8 @@ async def cmd_meus_modelos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("➕ Adicionar Novo Estilo", callback_data="btn_set_template")])
     keyboard.append([InlineKeyboardButton("🏠 Menu Principal", callback_data="btn_main_menu")])
 
-    await update.message.reply_text(
-        "📁 **Seus Modelos de Relatório Salvos**:\nClique em um modelo para torná-lo ativo:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    text = "📁 <b>Seus Modelos de Relatório Salvos:</b>\nClique em um modelo para torná-lo ativo:"
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ajustar"""
@@ -579,14 +901,29 @@ async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     report = database.get_latest_report(user_id)
     if not report:
-        await update.message.reply_text("Nenhum relatório encontrado para ajustar. Crie um relatório primeiro!", reply_markup=get_main_keyboard())
+        await safe_reply(update.message, "⚠️ Nenhum relatório encontrado para ajustar. Crie um relatório primeiro!", reply_markup=get_main_keyboard())
         return
     database.set_user_state(user_id, STATE_WAITING_ADJUSTMENT)
-    await update.message.reply_text(
-        "✏️ **Solicitar Ajustes no Relatório**\n\n"
-        "Descreva o que deseja mudar (ex: 'Deixe o texto mais resumido', 'Adicione uma coluna de Responsável na tabela', 'Remova a seção de riscos').",
-        parse_mode="Markdown"
+    text = (
+        "✏️ <b>Solicitar Ajustes no Relatório</b>\n\n"
+        "Descreva o que deseja mudar (ex: <i>'Deixe o texto mais resumido', 'Adicione uma coluna de Responsável na tabela', 'Remova a seção de riscos'</i>)."
     )
+    keyboard = [
+        [InlineKeyboardButton("❌ Cancelar Ajuste", callback_data="btn_main_menu")]
+    ]
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Captura qualquer exceção não tratada e registra no log"""
+    logger.error("Exceção não tratada no bot:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Ocorreu um erro temporário ao processar sua ação. Use /start para recarregar o menu principal.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception:
+            pass
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -596,7 +933,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot de Relatorios online no Render!")
 
     def log_message(self, format, *args):
-        pass  # Silencia logs de health check para manter o terminal limpo
+        pass
 
 def start_health_check_server():
     """Inicia um mini servidor HTTP para plataformas em nuvem como o Render.com"""
@@ -632,6 +969,9 @@ def main():
     logger.info("Iniciando Bot de Relatórios no Telegram...")
     app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
 
+    # Tratamento global de erros
+    app.add_error_handler(global_error_handler)
+
     # Comandos
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
@@ -641,10 +981,11 @@ def main():
     app.add_handler(CommandHandler("meus_modelos", cmd_meus_modelos))
     app.add_handler(CommandHandler("ajustar", cmd_ajustar))
 
-    # Callbacks inline
+    # Callbacks inline dos botões
     app.add_handler(CallbackQueryHandler(handle_callback_query))
 
-    # Mensagens de texto e documentos
+    # Mensagens de fotos, documentos e texto
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 

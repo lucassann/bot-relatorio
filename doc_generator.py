@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 
 # DOCX
@@ -15,7 +15,7 @@ from docx.oxml.ns import nsdecls, qn
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether, Image as RLImage
 from reportlab.pdfgen import canvas
 
 PRIMARY_HEX = "#1A365D"    # Deep Navy
@@ -152,7 +152,7 @@ def _set_cell_margins(cell, top=100, bottom=100, left=150, right=150):
     tcMar = parse_xml(f'<w:tcMar {nsdecls("w")}><w:top w:w="{top}" w:type="dxa"/><w:bottom w:w="{bottom}" w:type="dxa"/><w:left w:w="{left}" w:type="dxa"/><w:right w:w="{right}" w:type="dxa"/></w:tcMar>')
     tcPr.append(tcMar)
 
-def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório") -> Path:
+def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório", image_paths: Optional[List[Path]] = None) -> Path:
     """Gera um documento Microsoft Word (.docx) estilizado a partir do Markdown"""
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +306,33 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
             p_space.paragraph_format.space_before = Pt(6)
             p_space.paragraph_format.space_after = Pt(6)
 
+    # Anexa as imagens/fotos analisadas ao final do documento
+    if image_paths:
+        valid_images = [Path(p) for p in image_paths if Path(p).exists()]
+        if valid_images:
+            p_sec = doc.add_paragraph()
+            p_sec.paragraph_format.space_before = Pt(16)
+            p_sec.paragraph_format.space_after = Pt(6)
+            run_sec = p_sec.add_run("📸 Imagens / Anexos Analisados")
+            run_sec.font.name = "Calibri"
+            run_sec.font.size = Pt(13)
+            run_sec.font.bold = True
+            run_sec.font.color.rgb = SECONDARY_COLOR
+
+            for img_p in valid_images:
+                try:
+                    doc.add_picture(str(img_p), width=Inches(5.0))
+                    p_cap = doc.add_paragraph()
+                    p_cap.paragraph_format.space_before = Pt(2)
+                    p_cap.paragraph_format.space_after = Pt(10)
+                    r_cap = p_cap.add_run(f"Anexo: {img_p.name}")
+                    r_cap.font.name = "Calibri"
+                    r_cap.font.size = Pt(9)
+                    r_cap.font.italic = True
+                    r_cap.font.color.rgb = RGBColor(0x71, 0x80, 0x96)
+                except Exception:
+                    pass
+
     doc.save(str(out_file))
     return out_file
 
@@ -318,7 +345,7 @@ def _clean_md_for_pdf(text: str) -> str:
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     return text
 
-def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório") -> Path:
+def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório", image_paths: Optional[List[Path]] = None) -> Path:
     """Gera um documento PDF com diagramação e tipografia executiva a partir do Markdown"""
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -498,6 +525,20 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
             story.append(Spacer(1, 6))
             story.append(pdf_table)
             story.append(Spacer(1, 10))
+
+    # Anexa as fotos/imagens analisadas no PDF
+    if image_paths:
+        valid_images = [Path(p) for p in image_paths if Path(p).exists()]
+        if valid_images:
+            story.append(Spacer(1, 14))
+            story.append(Paragraph("<b>📸 Imagens / Anexos Analisados</b>", h2_style))
+            story.append(Spacer(1, 8))
+            for img_p in valid_images:
+                try:
+                    story.append(RLImage(str(img_p), width=450, height=260, kind='proportional'))
+                    story.append(Spacer(1, 10))
+                except Exception:
+                    pass
 
     doc.build(story, canvasmaker=NumberedCanvas)
     return out_file

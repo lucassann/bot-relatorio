@@ -8,3 +8,4 @@ data/outputs/*
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
 bot.log
+bot.pid
