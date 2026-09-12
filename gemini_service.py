@@ -74,7 +74,11 @@ GUIA:
     contents.extend(_prepare_image_parts(image_paths))
     contents.append(prompt)
 
-    models_to_try = [config.GEMINI_MODEL, "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    models_to_try = []
+    for mod in candidate_models:
+        if mod and mod not in models_to_try:
+            models_to_try.append(mod)
     last_err = None
 
     for m in models_to_try:
@@ -147,7 +151,11 @@ Analise com atenção todas as fotos/imagens e textos fornecidos. Extraia minuci
     contents.extend(image_parts)
     contents.append(user_message)
 
-    models_to_try = [config.GEMINI_MODEL, "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    models_to_try = []
+    for mod in candidate_models:
+        if mod and mod not in models_to_try:
+            models_to_try.append(mod)
     last_err = None
 
     for m in models_to_try:
@@ -195,7 +203,11 @@ Reescreva o relatório completo aplicando pontualmente todos os ajustes solicita
     contents.extend(_prepare_image_parts(image_paths))
     contents.append(prompt)
 
-    models_to_try = [config.GEMINI_MODEL, "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    models_to_try = []
+    for mod in candidate_models:
+        if mod and mod not in models_to_try:
+            models_to_try.append(mod)
     last_err = None
 
     for m in models_to_try:

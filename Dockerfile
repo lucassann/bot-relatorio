@@ -14,5 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia o código da aplicação
 COPY . .
 
+# Porta padrão para plataformas em nuvem (Render, Koyeb, Fly.io, etc)
+ENV PORT=10000
+EXPOSE 10000
+
 # Comando de inicialização
 CMD ["python", "bot.py"]

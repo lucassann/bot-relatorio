@@ -1,8 +1,11 @@
 import os
 import re
 import html
+import json
+import time
 import logging
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
@@ -925,24 +928,138 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
+BOT_START_TIME = datetime.now()
+BOT_STATE = {
+    "is_running": False,
+    "last_error": None,
+    "ping_count": 0,
+    "last_ping_time": None
+}
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+    def _send_headers(self, status=200, content_type="text/html; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-type", content_type)
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(b"Bot de Relatorios online no Render!")
+
+    def do_HEAD(self):
+        self._send_headers(200, "text/plain")
+
+    def do_GET(self):
+        BOT_STATE["ping_count"] += 1
+        BOT_STATE["last_ping_time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+        parsed_path = self.path.split("?")[0].rstrip("/")
+        if parsed_path in ["/ping", "/health", "/healthz"]:
+            self._send_headers(200, "application/json")
+            uptime_seconds = int((datetime.now() - BOT_START_TIME).total_seconds())
+            res = {
+                "status": "ok" if not BOT_STATE["last_error"] else "warning",
+                "bot_running": BOT_STATE["is_running"],
+                "error": BOT_STATE["last_error"],
+                "uptime_seconds": uptime_seconds,
+                "ping_count": BOT_STATE["ping_count"],
+                "last_ping": BOT_STATE["last_ping_time"],
+                "model": config.GEMINI_MODEL
+            }
+            self.wfile.write(json.dumps(res, indent=2).encode("utf-8"))
+            return
+
+        # HTML Dashboard para quem abrir no navegador
+        self._send_headers(200, "text/html; charset=utf-8")
+        uptime_seconds = int((datetime.now() - BOT_START_TIME).total_seconds())
+        hours = uptime_seconds // 3600
+        minutes = (uptime_seconds % 3600) // 60
+        seconds = uptime_seconds % 60
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+        has_telegram = bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_BOT_TOKEN != "seu_token_aqui")
+        has_gemini = bool(config.GEMINI_API_KEY and config.GEMINI_API_KEY != "sua_api_key_aqui")
+        is_ok = has_telegram and has_gemini and not BOT_STATE["last_error"]
+        status_badge = "🟢 ONLINE 24/7" if is_ok else "🔴 ATENÇÃO REQUERIDA"
+
+        badge_bg = "#10b981" if is_ok else "#ef4444"
+        err_section = f'<div class="error-box"><b>⚠️ Detalhes do Problema:</b><br>{html.escape(str(BOT_STATE["last_error"]))}</div>' if BOT_STATE["last_error"] else ''
+
+        html_body = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Status: Bot de Relatórios Telegram</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 1.5rem; display: flex; justify-content: center; align-items: center; min-height: 100vh; box-sizing: border-box; }}
+        .card {{ background: #1e293b; border-radius: 1rem; padding: 2rem; max-width: 600px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); border: 1px solid #334155; }}
+        h1 {{ margin-top: 0; font-size: 1.4rem; display: flex; align-items: center; gap: 0.5rem; }}
+        .badge {{ display: inline-block; padding: 0.35rem 0.85rem; border-radius: 9999px; font-weight: bold; font-size: 0.85rem; background: {badge_bg}; color: white; margin-bottom: 1rem; }}
+        .metric {{ background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; font-size: 0.9rem; }}
+        .metric span.value {{ font-family: monospace; font-weight: bold; }}
+        .tip {{ background: #1e3a8a; border-left: 4px solid #3b82f6; padding: 0.85rem 1rem; border-radius: 0.35rem; font-size: 0.85rem; margin-top: 1.25rem; line-height: 1.5; }}
+        .error-box {{ background: #7f1d1d; border-left: 4px solid #ef4444; padding: 0.85rem 1rem; border-radius: 0.35rem; font-size: 0.85rem; margin-top: 1rem; color: #fecaca; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">{status_badge}</div>
+        <h1>🤖 Bot de Relatórios Telegram</h1>
+        <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 1.25rem;">Monitor de execução em nuvem e integridade do bot.</p>
+        
+        <div class="metric"><span>Telegram Bot:</span><span class="value">{"✅ Conectado" if has_telegram else "❌ Não configurado"}</span></div>
+        <div class="metric"><span>Google Gemini API:</span><span class="value">{"✅ Configurado" if has_gemini else "❌ Não configurado"}</span></div>
+        <div class="metric"><span>Modelo IA:</span><span class="value">{config.GEMINI_MODEL}</span></div>
+        <div class="metric"><span>Tempo Ativo (Uptime):</span><span class="value">{uptime_str}</span></div>
+        <div class="metric"><span>Pings de Manutenção:</span><span class="value">{BOT_STATE['ping_count']} requisições</span></div>
+        <div class="metric"><span>Último Ping:</span><span class="value">{BOT_STATE['last_ping_time'] or 'Aguardando primeiro ping'}</span></div>
+        
+        {err_section}
+        
+        <div class="tip">
+            💡 <b>Para manter rodando 24h sem hibernar no plano gratuito (Render):</b><br>
+            Cadastre a URL deste site no <b>UptimeRobot.com</b> (grátis) configurando para pingar a cada 5 minutos. Isso impede que o Render suspenda o bot por inatividade!
+        </div>
+    </div>
+</body>
+</html>"""
+        self.wfile.write(html_body.encode("utf-8"))
 
     def log_message(self, format, *args):
         pass
 
+def _keep_alive_worker(target_url: str):
+    """Thread em segundo plano que pinga a URL da aplicação para evitar o desligamento por inatividade"""
+    logger.info(f"Auto Keep-Alive ativado para URL: {target_url} (intervalo: 10 minutos)")
+    time.sleep(30)
+    health_url = f"{target_url.rstrip('/')}/health"
+    while True:
+        try:
+            req = urllib.request.Request(health_url, headers={"User-Agent": "TelegramBotKeepAlive/1.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                if resp.status == 200:
+                    logger.info("Auto Keep-Alive ping executado com sucesso.")
+        except Exception as e:
+            logger.debug(f"Aviso Auto Keep-Alive: {e}")
+        time.sleep(600)
+
+def start_keep_alive():
+    """Verifica se há URL externa (Render, Koyeb ou variável customizada) e ativa o auto-ping"""
+    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL") or os.getenv("APP_URL")
+    if url:
+        t = threading.Thread(target=_keep_alive_worker, args=(url,), daemon=True)
+        t.start()
+
 def start_health_check_server():
-    """Inicia um mini servidor HTTP para plataformas em nuvem como o Render.com"""
+    """Inicia o servidor HTTP de monitoramento e keep-alive para plataformas em nuvem"""
     port = int(os.getenv("PORT", 0))
     if port:
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        logger.info(f"Servidor de Health Check iniciado na porta {port} para o Render")
+        try:
+            server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            logger.info(f"Servidor de Health Check e Monitor iniciado na porta {port}")
+            start_keep_alive()
+        except Exception as e:
+            logger.error(f"Erro ao iniciar servidor HTTP na porta {port}: {e}")
 
 def main():
     """Inicia o Bot Telegram"""
@@ -951,19 +1068,34 @@ def main():
 
     missing = config.check_config()
     if missing:
+        msg = f"As seguintes variáveis não estão configuradas: {', '.join(missing)}"
         logger.warning(
-            f"\n[AVISO IMPORTANTE] As seguintes variáveis não estão configuradas no .env: {', '.join(missing)}\n"
-            "Preencha o arquivo .env com o TELEGRAM_BOT_TOKEN e a GEMINI_API_KEY antes de iniciar o bot em produção!\n"
+            f"\n[AVISO IMPORTANTE] {msg}\n"
+            "Preencha o arquivo .env (local) ou as variáveis de ambiente na hospedagem (Render, Railway, etc.)!\n"
         )
+        BOT_STATE["last_error"] = msg
 
     if not config.TELEGRAM_BOT_TOKEN or config.TELEGRAM_BOT_TOKEN == "seu_token_aqui":
+        err_msg = "TELEGRAM_BOT_TOKEN não foi configurado!"
+        BOT_STATE["last_error"] = err_msg
         print("\n" + "="*70)
-        print("❌ ATENÇÃO: TELEGRAM_BOT_TOKEN não foi configurado no arquivo .env!")
-        print("1. Abra o arquivo .env")
-        print("2. Insira o token do seu bot obtido no @BotFather do Telegram")
-        print("3. Insira a sua GEMINI_API_KEY obtida no Google AI Studio")
-        print("4. Execute novamente: ./run.sh ou python bot.py")
+        print("❌ ATENÇÃO: TELEGRAM_BOT_TOKEN não foi configurado!")
+        print("Se você estiver rodando na NUVEM (ex: Render, Railway, Koyeb):")
+        print("👉 Acesse o painel da sua hospedagem, vá em 'Environment' ou 'Variables'")
+        print("👉 Adicione TELEGRAM_BOT_TOKEN com o token do seu bot")
+        print("👉 Adicione GEMINI_API_KEY com sua chave do Google AI Studio")
+        print("Se estiver rodando LOCALMENTE no seu computador:")
+        print("👉 Abra o arquivo .env e preencha as variáveis!")
         print("="*70 + "\n")
+
+        # Se estiver rodando em nuvem com porta web ativa, mantém vivo o dashboard de diagnóstico
+        if os.getenv("PORT"):
+            logger.info("Mantendo servidor web ativo na nuvem para exibir página de diagnóstico...")
+            try:
+                while True:
+                    time.sleep(3600)
+            except (KeyboardInterrupt, SystemExit):
+                pass
         return
 
     logger.info("Iniciando Bot de Relatórios no Telegram...")
@@ -989,8 +1121,17 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
+    BOT_STATE["is_running"] = True
+    BOT_STATE["last_error"] = None
     print("🚀 Bot iniciado com sucesso! Pressione Ctrl+C para encerrar.")
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Exception as e:
+        BOT_STATE["is_running"] = False
+        BOT_STATE["last_error"] = str(e)
+        logger.error(f"Erro no polling do Telegram: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main()
+

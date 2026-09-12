@@ -65,6 +65,48 @@ Assim que iniciado, o terminal mostrará:
 
 ---
 
+## 🌐 Como Rodar Online 24/7 Gratuitamente
+
+Para que o bot funcione 24 horas por dia sem precisar deixar o seu computador ligado:
+
+### Opção Recomendada: Render.com (Gratuito) + UptimeRobot (Keep-Alive)
+
+O plano gratuito do Render desliga ("hiberna") serviços que ficam 15 minutos sem receber acessos web. Como o Telegram se comunica internamente, o robô precisa de um ping periódico para se manter acordado:
+
+1. **Suba as alterações para o seu repositório GitHub**:
+   ```bash
+   git add .
+   git commit -m "fix: suporte completo a deploy online 24h"
+   git push origin main
+   ```
+2. **Crie o Web Service no Render**:
+   - Acesse [Render.com](https://render.com) e conecte sua conta do GitHub.
+   - Clique em **"New +"** -> **"Web Service"**.
+   - Selecione o repositório `bot-relatorio`.
+   - Em **Runtime**, escolha **Python**.
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+   - Em **Instance Type**, selecione **Free**.
+3. **Adicione as Variáveis de Ambiente no Render** (Aba *Environment*):
+   - `TELEGRAM_BOT_TOKEN`: o token do seu bot gerado pelo @BotFather.
+   - `GEMINI_API_KEY`: sua chave de API obtida no Google AI Studio.
+   - `GEMINI_MODEL`: `gemini-3.5-flash-lite` (ou `gemini-3.6-flash`).
+4. **Mantenha o Bot 24/7 Ativo com UptimeRobot (100% Grátis)**:
+   - Copie a URL pública gerada pelo Render (ex: `https://bot-relatorio-xyz.onrender.com`).
+   - Crie uma conta gratuita em [UptimeRobot.com](https://uptimerobot.com).
+   - Clique em **"Add New Monitor"**:
+     - **Monitor Type**: `HTTP(s)`
+     - **Friendly Name**: `Bot Telegram 24h`
+     - **URL (or IP)**: Cole a URL do seu Render (ex: `https://bot-relatorio-xyz.onrender.com/health`)
+     - **Monitoring Interval**: `5 minutes`
+   - Salve o monitor! A cada 5 minutos o UptimeRobot enviará uma requisição, impedindo que o Render coloque seu bot para dormir.
+
+> [!WARNING]
+> **ATENÇÃO AO CONFLITO DE INSTÂNCIAS:**
+> O Telegram só permite **uma instância ativa por token**. Quando colocar o bot para rodar online, lembre-se de parar o bot no seu computador local (`./stop.sh`), caso contrário uma instância derrubará a outra com erro de conflito (`409 Conflict`).
+
+---
+
 ## 📱 Como Usar no Telegram
 
 1. Inicie uma conversa com seu bot no Telegram e envie `/start`.
