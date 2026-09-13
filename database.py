@@ -1,6 +1,10 @@
+import os
+import time
 import sqlite3
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import config
 from config import DB_PATH
 
 def get_connection():
@@ -12,6 +16,10 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
+    # Ativa WAL Mode e Timeout para concorrência sem travamentos
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -19,10 +27,22 @@ def init_db():
         first_name TEXT,
         active_template_id INTEGER,
         current_state TEXT DEFAULT 'idle',
+        logo_path TEXT,
+        color_theme TEXT DEFAULT 'navy',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    # Migração segura para colunas logo_path e color_theme caso a tabela já exista
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN logo_path TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN color_theme TEXT DEFAULT 'navy'")
+    except Exception:
+        pass
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS templates (
@@ -191,3 +211,107 @@ def update_latest_report(report_id: int, generated_content: str, docx_path: str 
     """, (generated_content, docx_path, pdf_path, txt_path, report_id))
     conn.commit()
     conn.close()
+
+def update_user_logo(user_id: int, logo_path: Optional[str]):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET logo_path = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (logo_path, user_id))
+    conn.commit()
+    conn.close()
+
+def update_user_color_theme(user_id: int, color_theme: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET color_theme = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (color_theme, user_id))
+    conn.commit()
+    conn.close()
+
+def get_user_settings(user_id: int) -> Dict[str, Any]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT logo_path, color_theme FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"logo_path": row["logo_path"], "color_theme": row["color_theme"] or "navy"}
+    return {"logo_path": None, "color_theme": "navy"}
+
+def clear_user_files(user_id: int) -> Dict[str, int]:
+    """Exclui os arquivos físicos gerados (DOCX, PDF, TXT) do usuário, liberando espaço no disco"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, docx_path, pdf_path, txt_path FROM reports WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    
+    deleted_files = 0
+    freed_bytes = 0
+
+    for r in rows:
+        for key in ["docx_path", "pdf_path", "txt_path"]:
+            p_str = r[key]
+            if p_str:
+                p = Path(p_str)
+                if p.exists():
+                    try:
+                        freed_bytes += p.stat().st_size
+                        p.unlink()
+                        deleted_files += 1
+                    except Exception:
+                        pass
+        cursor.execute("UPDATE reports SET docx_path = '', pdf_path = '', txt_path = '' WHERE id = ?", (r["id"],))
+
+    # Limpa uploads temporários do usuário se houver prefixo do id
+    if config.UPLOADS_DIR.exists():
+        for f in config.UPLOADS_DIR.glob(f"*{user_id}*"):
+            if f.is_file():
+                try:
+                    freed_bytes += f.stat().st_size
+                    f.unlink()
+                    deleted_files += 1
+                except Exception:
+                    pass
+
+    conn.commit()
+    conn.close()
+    return {"deleted_files": deleted_files, "freed_bytes": freed_bytes}
+
+def clean_expired_files(max_age_hours: int = 24) -> Dict[str, int]:
+    """Limpa arquivos de uploads e outputs mais antigos que max_age_hours (preserva logos)"""
+    now = time.time()
+    max_age_sec = max_age_hours * 3600
+    deleted_files = 0
+    freed_bytes = 0
+
+    for folder in [config.UPLOADS_DIR, config.OUTPUTS_DIR]:
+        if not folder.exists():
+            continue
+        for item in folder.glob("*"):
+            if item.is_file():
+                if item.name.startswith("."):
+                    continue
+                try:
+                    age = now - item.stat().st_mtime
+                    if age > max_age_sec:
+                        freed_bytes += item.stat().st_size
+                        item.unlink()
+                        deleted_files += 1
+                except Exception:
+                    pass
+
+    return {"deleted_files": deleted_files, "freed_bytes": freed_bytes}
+
+def get_storage_summary() -> Dict[str, int]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) as count FROM users")
+    total_users = cursor.fetchone()["count"]
+    cursor.execute("SELECT COUNT(*) as count FROM templates")
+    total_templates = cursor.fetchone()["count"]
+    cursor.execute("SELECT COUNT(*) as count FROM reports")
+    total_reports = cursor.fetchone()["count"]
+    conn.close()
+    return {
+        "total_users": total_users,
+        "total_templates": total_templates,
+        "total_reports": total_reports
+    }

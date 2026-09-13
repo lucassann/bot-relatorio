@@ -5,7 +5,9 @@ __pycache__/
 data/*.db
 data/uploads/*
 data/outputs/*
+data/logos/*
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
+!data/logos/.gitkeep
 bot.log
 bot.pid

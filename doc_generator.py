@@ -18,15 +18,81 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether, Image as RLImage
 from reportlab.pdfgen import canvas
 
-PRIMARY_HEX = "#1A365D"    # Deep Navy
-SECONDARY_HEX = "#2B6CB0"  # Slate Blue
-TEXT_DARK_HEX = "#2D3748"  # Charcoal
-BG_LIGHT_HEX = "#F7FAFC"   # Very Light Gray
-BORDER_HEX = "#E2E8F0"     # Soft Gray
+COLOR_THEMES = {
+    "navy": {
+        "name": "Azul Executivo (Padrão)",
+        "primary_hex": "#1A365D",
+        "secondary_hex": "#2B6CB0",
+        "accent_hex": "#3182CE",
+        "bg_light_hex": "#F7FAFC",
+        "border_hex": "#E2E8F0",
+        "text_dark_hex": "#2D3748",
+        "primary_rgb": RGBColor(0x1A, 0x36, 0x5D),
+        "secondary_rgb": RGBColor(0x2B, 0x6C, 0xB0),
+        "text_dark_rgb": RGBColor(0x2D, 0x37, 0x48),
+    },
+    "green": {
+        "name": "Verde Corporativo",
+        "primary_hex": "#1C4532",
+        "secondary_hex": "#276749",
+        "accent_hex": "#38A169",
+        "bg_light_hex": "#F0FFF4",
+        "border_hex": "#C6F6D5",
+        "text_dark_hex": "#22543D",
+        "primary_rgb": RGBColor(0x1C, 0x45, 0x32),
+        "secondary_rgb": RGBColor(0x27, 0x67, 0x49),
+        "text_dark_rgb": RGBColor(0x22, 0x54, 0x3D),
+    },
+    "slate": {
+        "name": "Cinza Minimalista",
+        "primary_hex": "#1E293B",
+        "secondary_hex": "#475569",
+        "accent_hex": "#64748B",
+        "bg_light_hex": "#F8FAFC",
+        "border_hex": "#E2E8F0",
+        "text_dark_hex": "#0F172A",
+        "primary_rgb": RGBColor(0x1E, 0x29, 0x3B),
+        "secondary_rgb": RGBColor(0x47, 0x55, 0x69),
+        "text_dark_rgb": RGBColor(0x0F, 0x17, 0x2A),
+    },
+    "burgundy": {
+        "name": "Bordô Elegante",
+        "primary_hex": "#702459",
+        "secondary_hex": "#97266D",
+        "accent_hex": "#B83280",
+        "bg_light_hex": "#FFF5F7",
+        "border_hex": "#FED7E2",
+        "text_dark_hex": "#521B41",
+        "primary_rgb": RGBColor(0x70, 0x24, 0x59),
+        "secondary_rgb": RGBColor(0x97, 0x26, 0x6D),
+        "text_dark_rgb": RGBColor(0x52, 0x1B, 0x41),
+    },
+    "dark": {
+        "name": "Preto & Grafite",
+        "primary_hex": "#111827",
+        "secondary_hex": "#374151",
+        "accent_hex": "#4B5563",
+        "bg_light_hex": "#F3F4F6",
+        "border_hex": "#D1D5DB",
+        "text_dark_hex": "#111827",
+        "primary_rgb": RGBColor(0x11, 0x18, 0x27),
+        "secondary_rgb": RGBColor(0x37, 0x41, 0x51),
+        "text_dark_rgb": RGBColor(0x11, 0x18, 0x27),
+    }
+}
 
-PRIMARY_COLOR = RGBColor(0x1A, 0x36, 0x5D)
-SECONDARY_COLOR = RGBColor(0x2B, 0x6C, 0xB0)
-TEXT_DARK = RGBColor(0x2D, 0x37, 0x48)
+def get_theme(theme_name: str = "navy") -> Dict[str, Any]:
+    return COLOR_THEMES.get(theme_name, COLOR_THEMES["navy"])
+
+PRIMARY_HEX = COLOR_THEMES["navy"]["primary_hex"]
+SECONDARY_HEX = COLOR_THEMES["navy"]["secondary_hex"]
+TEXT_DARK_HEX = COLOR_THEMES["navy"]["text_dark_hex"]
+BG_LIGHT_HEX = COLOR_THEMES["navy"]["bg_light_hex"]
+BORDER_HEX = COLOR_THEMES["navy"]["border_hex"]
+
+PRIMARY_COLOR = COLOR_THEMES["navy"]["primary_rgb"]
+SECONDARY_COLOR = COLOR_THEMES["navy"]["secondary_rgb"]
+TEXT_DARK = COLOR_THEMES["navy"]["text_dark_rgb"]
 
 class NumberedCanvas(canvas.Canvas):
     """Canvas de duas passadas para inserir 'Página X de Y' no rodapé do PDF"""
@@ -152,10 +218,20 @@ def _set_cell_margins(cell, top=100, bottom=100, left=150, right=150):
     tcMar = parse_xml(f'<w:tcMar {nsdecls("w")}><w:top w:w="{top}" w:type="dxa"/><w:bottom w:w="{bottom}" w:type="dxa"/><w:left w:w="{left}" w:type="dxa"/><w:right w:w="{right}" w:type="dxa"/></w:tcMar>')
     tcPr.append(tcMar)
 
-def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório", image_paths: Optional[List[Path]] = None) -> Path:
+def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório",
+                       image_paths: Optional[List[Path]] = None,
+                       logo_path: Optional[str | Path] = None,
+                       color_theme: str = "navy") -> Path:
     """Gera um documento Microsoft Word (.docx) estilizado a partir do Markdown"""
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    theme = get_theme(color_theme)
+    theme_primary = theme["primary_rgb"]
+    theme_secondary = theme["secondary_rgb"]
+    theme_text_dark = theme["text_dark_rgb"]
+    theme_primary_hex = theme["primary_hex"]
+    theme_bg_light_hex = theme["bg_light_hex"]
 
     doc = docx.Document()
 
@@ -165,6 +241,17 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
         section.bottom_margin = Inches(1.0)
         section.left_margin = Inches(1.0)
         section.right_margin = Inches(1.0)
+
+    # Inserção de Logo no início se houver
+    if logo_path and Path(logo_path).exists():
+        try:
+            p_logo = doc.add_paragraph()
+            p_logo.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p_logo.paragraph_format.space_before = Pt(0)
+            p_logo.paragraph_format.space_after = Pt(10)
+            p_logo.add_run().add_picture(str(logo_path), width=Inches(1.5))
+        except Exception:
+            pass
 
     blocks = parse_markdown_blocks(markdown_text)
 
@@ -186,7 +273,7 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
                 run.font.name = "Calibri"
                 run.font.size = Pt(24)
                 run.font.bold = True
-                run.font.color.rgb = PRIMARY_COLOR
+                run.font.color.rgb = theme_primary
 
                 # Subtítulo com data
                 p_sub = doc.add_paragraph()
@@ -213,13 +300,13 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
 
             if level == 1:
                 run.font.size = Pt(16)
-                run.font.color.rgb = PRIMARY_COLOR
+                run.font.color.rgb = theme_primary
             elif level == 2:
                 run.font.size = Pt(13)
-                run.font.color.rgb = SECONDARY_COLOR
+                run.font.color.rgb = theme_secondary
             else:
                 run.font.size = Pt(11)
-                run.font.color.rgb = TEXT_DARK
+                run.font.color.rgb = theme_text_dark
 
         elif btype == "paragraph":
             p = doc.add_paragraph()
@@ -273,7 +360,7 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
                 cell = hdr_cells[col_idx]
                 val = headers[col_idx] if col_idx < len(headers) else ""
                 cell.text = val
-                _apply_cell_shading(cell, PRIMARY_HEX)
+                _apply_cell_shading(cell, theme_primary_hex)
                 _set_cell_margins(cell, top=120, bottom=120, left=150, right=150)
                 cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                 for cp in cell.paragraphs:
@@ -287,7 +374,7 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
             # Linhas de dados
             for r_idx, row_data in enumerate(rows):
                 row_cells = table.rows[r_idx + 1].cells
-                bg_color = BG_LIGHT_HEX if r_idx % 2 == 1 else "#FFFFFF"
+                bg_color = theme_bg_light_hex if r_idx % 2 == 1 else "#FFFFFF"
                 for col_idx in range(cols_count):
                     cell = row_cells[col_idx]
                     val = row_data[col_idx] if col_idx < len(row_data) else ""
@@ -299,7 +386,7 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
                         for run in cp.runs:
                             run.font.name = "Calibri"
                             run.font.size = Pt(9.5)
-                            run.font.color.rgb = TEXT_DARK
+                            run.font.color.rgb = theme_text_dark
 
             # Espaçamento após tabela
             p_space = doc.add_paragraph()
@@ -317,7 +404,7 @@ def create_docx_report(markdown_text: str, output_path: str | Path, title_hint: 
             run_sec.font.name = "Calibri"
             run_sec.font.size = Pt(13)
             run_sec.font.bold = True
-            run_sec.font.color.rgb = SECONDARY_COLOR
+            run_sec.font.color.rgb = theme_secondary
 
             for img_p in valid_images:
                 try:
@@ -345,10 +432,20 @@ def _clean_md_for_pdf(text: str) -> str:
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     return text
 
-def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório", image_paths: Optional[List[Path]] = None) -> Path:
+def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: str = "Relatório",
+                      image_paths: Optional[List[Path]] = None,
+                      logo_path: Optional[str | Path] = None,
+                      color_theme: str = "navy") -> Path:
     """Gera um documento PDF com diagramação e tipografia executiva a partir do Markdown"""
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    theme = get_theme(color_theme)
+    theme_primary_hex = theme["primary_hex"]
+    theme_secondary_hex = theme["secondary_hex"]
+    theme_text_dark_hex = theme["text_dark_hex"]
+    theme_bg_light_hex = theme["bg_light_hex"]
+    theme_border_hex = theme["border_hex"]
 
     doc = SimpleDocTemplate(
         str(out_file),
@@ -367,7 +464,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica-Bold",
         fontSize=22,
         leading=26,
-        textColor=colors.HexColor(PRIMARY_HEX),
+        textColor=colors.HexColor(theme_primary_hex),
         spaceAfter=4
     )
 
@@ -387,7 +484,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica-Bold",
         fontSize=14,
         leading=18,
-        textColor=colors.HexColor(PRIMARY_HEX),
+        textColor=colors.HexColor(theme_primary_hex),
         spaceBefore=14,
         spaceAfter=6,
         keepWithNext=True
@@ -399,7 +496,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica-Bold",
         fontSize=11.5,
         leading=15,
-        textColor=colors.HexColor(SECONDARY_HEX),
+        textColor=colors.HexColor(theme_secondary_hex),
         spaceBefore=10,
         spaceAfter=4,
         keepWithNext=True
@@ -411,7 +508,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica",
         fontSize=10,
         leading=14,
-        textColor=colors.HexColor(TEXT_DARK_HEX),
+        textColor=colors.HexColor(theme_text_dark_hex),
         spaceAfter=6
     )
 
@@ -421,7 +518,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica",
         fontSize=9.5,
         leading=13.5,
-        textColor=colors.HexColor(TEXT_DARK_HEX),
+        textColor=colors.HexColor(theme_text_dark_hex),
         leftIndent=14,
         spaceAfter=3
     )
@@ -432,7 +529,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
         fontName="Helvetica",
         fontSize=8.5,
         leading=11,
-        textColor=colors.HexColor(TEXT_DARK_HEX)
+        textColor=colors.HexColor(theme_text_dark_hex)
     )
 
     table_hdr_style = ParagraphStyle(
@@ -445,6 +542,15 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
     )
 
     story = []
+
+    # Inserção de Logo no topo do PDF se houver
+    if logo_path and Path(logo_path).exists():
+        try:
+            story.append(RLImage(str(logo_path), width=130, height=45, kind='proportional'))
+            story.append(Spacer(1, 10))
+        except Exception:
+            pass
+
     blocks = parse_markdown_blocks(markdown_text)
     first_h1 = True
 
@@ -461,7 +567,7 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
                 story.append(Paragraph(_clean_md_for_pdf(raw_text), title_style))
                 date_str = datetime.now().strftime("%d de %B de %Y")
                 story.append(Paragraph(f"Data de Emissão: {date_str} • Status: Oficial", subtitle_style))
-                story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(PRIMARY_HEX), spaceAfter=14))
+                story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(theme_primary_hex), spaceAfter=14))
                 first_h1 = False
                 continue
 
@@ -505,20 +611,20 @@ def create_pdf_report(markdown_text: str, output_path: str | Path, title_hint: s
                 table_data.append(row_cells)
 
             t_style = [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(PRIMARY_HEX)),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(theme_primary_hex)),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("TOPPADDING", (0, 0), (-1, -1), 6),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(BORDER_HEX)),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(theme_border_hex)),
             ]
 
             # Linhas com zebrado suave
             for r_idx in range(1, len(table_data)):
                 if r_idx % 2 == 0:
-                    t_style.append(("BACKGROUND", (0, r_idx), (-1, r_idx), colors.HexColor(BG_LIGHT_HEX)))
+                    t_style.append(("BACKGROUND", (0, r_idx), (-1, r_idx), colors.HexColor(theme_bg_light_hex)))
 
             pdf_table = Table(table_data, colWidths=[col_width] * cols_count)
             pdf_table.setStyle(TableStyle(t_style))

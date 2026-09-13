@@ -3,15 +3,18 @@ import re
 import html
 import json
 import time
+import shutil
+import asyncio
 import logging
 import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -39,6 +42,110 @@ STATE_IDLE = "idle"
 STATE_WAITING_TEMPLATE = "waiting_template"
 STATE_WAITING_REPORT_INPUT = "waiting_report_input"
 STATE_WAITING_ADJUSTMENT = "waiting_adjustment"
+STATE_WAITING_LOGO = "waiting_logo"
+
+def get_system_metrics() -> Dict[str, Any]:
+    """Calcula métricas de disco, memória RAM e arquivos do bot em tempo real"""
+    # Disco do sistema
+    disk = shutil.disk_usage(str(config.BASE_DIR))
+    disk_total_gb = disk.total / (1024**3)
+    disk_used_gb = disk.used / (1024**3)
+    disk_free_gb = disk.free / (1024**3)
+    disk_pct = (disk.used / disk.total) * 100 if disk.total > 0 else 0
+
+    # Memória RAM do sistema (Linux /proc/meminfo)
+    total_ram_mb = 0
+    used_ram_mb = 0
+    free_ram_mb = 0
+    ram_pct = 0
+    if os.path.exists("/proc/meminfo"):
+        try:
+            mem = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        mem[parts[0].strip()] = int(parts[1].strip().split()[0])
+            total_ram_mb = mem.get("MemTotal", 0) / 1024
+            free_ram_mb = mem.get("MemAvailable", mem.get("MemFree", 0)) / 1024
+            used_ram_mb = max(0, total_ram_mb - free_ram_mb)
+            if total_ram_mb > 0:
+                ram_pct = (used_ram_mb / total_ram_mb) * 100
+        except Exception:
+            pass
+
+    # Arquivos armazenados pelo bot
+    def get_dir_info(path: Path) -> Tuple[float, int]:
+        total_b = 0
+        count = 0
+        if path.exists():
+            for p in path.glob("*"):
+                if p.is_file() and not p.name.startswith("."):
+                    try:
+                        total_b += p.stat().st_size
+                        count += 1
+                    except Exception:
+                        pass
+        return total_b / (1024 * 1024), count
+
+    uploads_mb, uploads_count = get_dir_info(config.UPLOADS_DIR)
+    outputs_mb, outputs_count = get_dir_info(config.OUTPUTS_DIR)
+    db_mb = (config.DB_PATH.stat().st_size / (1024 * 1024)) if config.DB_PATH.exists() else 0
+    db_stats = database.get_storage_summary()
+
+    return {
+        "disk_total_gb": disk_total_gb,
+        "disk_used_gb": disk_used_gb,
+        "disk_free_gb": disk_free_gb,
+        "disk_pct": disk_pct,
+        "total_ram_mb": total_ram_mb,
+        "used_ram_mb": used_ram_mb,
+        "free_ram_mb": free_ram_mb,
+        "ram_pct": ram_pct,
+        "uploads_mb": uploads_mb,
+        "uploads_count": uploads_count,
+        "outputs_mb": outputs_mb,
+        "outputs_count": outputs_count,
+        "db_mb": db_mb,
+        "bot_total_mb": uploads_mb + outputs_mb + db_mb,
+        "total_reports": db_stats["total_reports"],
+        "total_templates": db_stats["total_templates"],
+        "total_users": db_stats["total_users"],
+    }
+
+def format_progress_bar(pct: float, length: int = 10) -> str:
+    filled = int(round((pct / 100.0) * length))
+    filled = max(0, min(length, filled))
+    return "█" * filled + "░" * (length - filled)
+
+def format_storage_message(metrics: Dict[str, Any]) -> str:
+    disk_bar = format_progress_bar(metrics["disk_pct"])
+    ram_bar = format_progress_bar(metrics["ram_pct"]) if metrics["total_ram_mb"] > 0 else "N/A"
+
+    ram_section = ""
+    if metrics["total_ram_mb"] > 0:
+        ram_section = (
+            f"🧠 <b>Memória RAM do Servidor:</b>\n"
+            f"<code>[{ram_bar}] {metrics['ram_pct']:.1f}%</code>\n"
+            f"• Usada: <b>{metrics['used_ram_mb']:.0f} MB</b> de <b>{metrics['total_ram_mb']:.0f} MB</b>\n"
+            f"• Disponível: <b>{metrics['free_ram_mb']:.0f} MB</b> livres\n\n"
+        )
+
+    text = (
+        "💾 <b>Monitor de Armazenamento & Memória em Tempo Real</b>\n\n"
+        f"💽 <b>Espaço em Disco:</b>\n"
+        f"<code>[{disk_bar}] {metrics['disk_pct']:.1f}%</code>\n"
+        f"• Usado: <b>{metrics['disk_used_gb']:.1f} GB</b> de <b>{metrics['disk_total_gb']:.1f} GB</b>\n"
+        f"• Livre: <b>{metrics['disk_free_gb']:.1f} GB</b> disponíveis\n\n"
+        f"{ram_section}"
+        "📁 <b>Arquivos Armazenados pelo Bot:</b>\n"
+        f"• Documentos Gerados (Word/PDF): <b>{metrics['outputs_count']}</b> arquivos (<b>{metrics['outputs_mb']:.2f} MB</b>)\n"
+        f"• Anexos / Uploads recebidos: <b>{metrics['uploads_count']}</b> arquivos (<b>{metrics['uploads_mb']:.2f} MB</b>)\n"
+        f"• Banco de Dados SQLite: <b>{metrics['db_mb']:.2f} MB</b> ({metrics['total_reports']} relatórios salvos)\n"
+        f"• <b>Total Ocupado pelo Bot:</b> <b>{metrics['bot_total_mb']:.2f} MB</b>\n\n"
+        "<i>💡 Clique em 'Esvaziar Arquivos Salvos' abaixo para apagar os arquivos físicos e liberar espaço na hora!</i>"
+    )
+    return text
 
 def get_main_keyboard():
     keyboard = [
@@ -51,7 +158,54 @@ def get_main_keyboard():
             InlineKeyboardButton("📁 Meus Modelos", callback_data="btn_my_templates")
         ],
         [
+            InlineKeyboardButton("💾 Armazenamento & Disco", callback_data="btn_storage_status"),
+            InlineKeyboardButton("🏢 Marca & Cores", callback_data="btn_brand_settings")
+        ],
+        [
             InlineKeyboardButton("❓ Ajuda / Como Usar", callback_data="btn_help")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_storage_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("🗑️ Esvaziar Arquivos Salvos", callback_data="btn_confirm_clear_files"),
+            InlineKeyboardButton("🔄 Atualizar Status", callback_data="btn_refresh_storage")
+        ],
+        [
+            InlineKeyboardButton("🏠 Menu Principal", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_brand_keyboard(has_logo: bool = False):
+    keyboard = [
+        [
+            InlineKeyboardButton("🖼️ Enviar Logo da Empresa", callback_data="btn_set_logo"),
+            InlineKeyboardButton("🎨 Mudar Cores do Documento", callback_data="btn_choose_color")
+        ]
+    ]
+    if has_logo:
+        keyboard.append([InlineKeyboardButton("❌ Remover Logo Atual", callback_data="btn_remove_logo")])
+    keyboard.append([InlineKeyboardButton("🏠 Menu Principal", callback_data="btn_main_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_color_themes_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("🔵 Azul Executivo", callback_data="theme_navy"),
+            InlineKeyboardButton("🟢 Verde Corporativo", callback_data="theme_green")
+        ],
+        [
+            InlineKeyboardButton("⚪ Cinza Minimalista", callback_data="theme_slate"),
+            InlineKeyboardButton("🟣 Bordô Elegante", callback_data="theme_burgundy")
+        ],
+        [
+            InlineKeyboardButton("⚫ Preto & Grafite", callback_data="theme_dark")
+        ],
+        [
+            InlineKeyboardButton("🔙 Voltar", callback_data="btn_brand_settings")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -114,6 +268,10 @@ async def send_chunked_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start"""
     user = update.effective_user
+    if not config.is_user_allowed(user.id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+
     database.get_or_create_user(user.id, user.username, user.first_name)
     database.set_user_state(user.id, STATE_IDLE)
 
@@ -127,9 +285,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 Olá, <b>{user_name}</b>! Bem-vindo ao seu <b>Gerador Inteligente de Relatórios</b>.\n\n"
         f"🎯 <b>Estilo/Modelo Ativo</b>: <code>{tpl_escaped}</code>\n\n"
         "Com este bot, você pode:\n"
-        "1. <b>Definir seu Estilo/Layout</b>: Envie um PDF, Word (.docx), TXT, ou tire uma foto de um modelo impresso, ou dite como deseja a estrutura.\n"
-        "2. <b>Gerar Relatórios por Texto, Arquivo ou Fotos</b>: Envie rascunhos, planilhas ou <b>fotos/imagens</b> (recibos, notas fiscais, relatórios escaneados, fotos de lousa, anotações manuscritas) — a I.A extrai todos os dados e gera o documento em <b>Word (.docx)</b>, <b>PDF</b> e <b>TXT</b>.\n"
-        "3. <b>Refinar e Ajustar</b>: Peça alterações na hora (<i>'mude a tabela', 'adicione conclusões', 'deixe mais formal'</i>).\n\n"
+        "1. <b>Definir seu Estilo/Layout</b>: Envie um PDF, Word (.docx), TXT, foto ou áudio ditando como deseja a estrutura.\n"
+        "2. <b>Gerar Relatórios por Fotos, Áudio, Arquivo ou Texto</b>:\n"
+        "   • 📸 <b>Fotos / Recibos / Notas</b>: OCR Gemini extrai tabelas e dados automaticamente;\n"
+        "   • 🎙️ <b>Áudios / Mensagens de Voz</b>: grave sua voz e a I.A transcreve e estrutura o relatório;\n"
+        "   • 📄 <b>Documentos / Rascunhos</b>: gere Word (.docx), PDF e TXT na hora.\n"
+        "3. <b>Marca & Cores Personalizadas</b>: insira o logo da sua empresa e troque a paleta de cores.\n"
+        "4. <b>Monitor em Tempo Real</b>: veja o uso de memória RAM, disco e esvazie arquivos com 1 clique.\n\n"
         "O que deseja fazer agora?"
     )
 
@@ -137,22 +299,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ajuda"""
+    user = update.effective_user
+    if user and not config.is_user_allowed(user.id):
+        return
+
     text = (
         "📖 <b>Guia Rápido de Uso</b>:\n\n"
         "🔹 <b>Como definir o estilo desejado?</b>\n"
-        "Clique em <i>'🎨 Definir Novo Estilo'</i> ou envie o comando /modelo.\n"
-        "Em seguida, envie um arquivo (Word, PDF, TXT ou foto) ou escreva as orientações de formato que você deseja.\n\n"
+        "Clique em <i>'🎨 Definir Novo Estilo'</i> ou envie /modelo.\n"
+        "Envie um arquivo (Word, PDF, TXT), uma foto ou um áudio explicando a estrutura.\n\n"
         "🔹 <b>Como gerar um relatório?</b>\n"
-        "Clique em <i>'🚀 Novo Relatório'</i> ou envie diretamente:\n"
-        "• 📸 <b>Fotos/Imagens</b>: de notas fiscais, recibos, quadros, tabelas ou anotações (a IA extrai todos os dados com OCR inteligente!)\n"
-        "• ✍️ <b>Texto</b>: rascunhos, números ou anotações coladas no chat\n"
-        "• 📄 <b>Documentos</b>: arquivos Word, PDF, CSV ou TXT\n\n"
+        "Clique em <i>'🚀 Novo Relatório'</i> ou envie diretamente no chat:\n"
+        "• 📸 <b>Fotos/Imagens</b>: fotos de notas fiscais, recibos, quadros, tabelas ou anotações (a IA extrai todos os dados com visão computacional!)\n"
+        "• 🎙️ <b>Áudios / Mensagens de Voz</b>: envie um áudio e a IA transcreve e gera o documento automaticamente.\n"
+        "• ✍️ <b>Texto</b>: rascunhos, dados ou anotações coladas no chat.\n"
+        "• 📄 <b>Documentos</b>: arquivos Word, PDF, CSV ou TXT.\n\n"
         "🔹 <b>Como pedir ajustes?</b>\n"
-        "Após a geração do relatório, clique no botão <i>'✏️ Ajustar / Refinar'</i> e envie as mudanças que quiser. O documento será atualizado na hora!\n\n"
-        "🔹 <b>Comandos rápidos</b>:\n"
+        "Após a geração do relatório, clique em <i>'✏️ Ajustar / Refinar'</i> ou use /ajustar e diga o que mudar.\n\n"
+        "🔹 <b>Comandos Rápidos</b>:\n"
         "• /start - Menu Principal\n"
         "• /modelo - Configurar novo modelo de layout\n"
         "• /meus_modelos - Listar e trocar de modelo\n"
+        "• /armazenamento - Ver memória RAM e disco em tempo real\n"
+        "• /limpar - Esvaziar arquivos temporários e liberar espaço\n"
+        "• /marca - Personalizar logo da empresa e cores do documento\n"
         "• /ajustar - Ajustar o último relatório\n"
         "• /cancelar - Cancelar operação atual"
     )
@@ -180,6 +350,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
     user = query.from_user
     user_id = user.id
+
+    if not config.is_user_allowed(user_id):
+        await query.answer("Acesso não autorizado.", show_alert=True)
+        return
 
     logger.info(f"Botão clicado: '{data}' pelo usuário {user.first_name} (ID: {user_id})")
     database.get_or_create_user(user_id, user.username, user.first_name)
@@ -463,6 +637,110 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Analisando estilo da foto enviada...")
             await process_template_creation(query.message, context, user_id, image_paths=[photo_path])
 
+        elif data == "btn_storage_status":
+            metrics = get_system_metrics()
+            text = format_storage_message(metrics)
+            await safe_reply(query, text, reply_markup=get_storage_keyboard())
+
+        elif data == "btn_refresh_storage":
+            metrics = get_system_metrics()
+            text = format_storage_message(metrics)
+            await query.answer("Status atualizado em tempo real!")
+            try:
+                await query.edit_message_text(text, parse_mode="HTML", reply_markup=get_storage_keyboard())
+            except Exception:
+                await safe_reply(query, text, reply_markup=get_storage_keyboard())
+
+        elif data == "btn_confirm_clear_files":
+            keyboard = [
+                [InlineKeyboardButton("⚠️ Sim, Esvaziar Arquivos", callback_data="btn_do_clear_files")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="btn_storage_status")]
+            ]
+            text = (
+                "🗑️ <b>Confirmação de Limpeza de Arquivos</b>\n\n"
+                "Isso irá apagar permanentemente do servidor os arquivos físicos gerados (Word .docx, PDF, TXT) e anexos temporários.\n\n"
+                "✅ <i>O histórico textual dos relatórios continuará salvo no seu banco de dados.</i>\n\n"
+                "Deseja esvaziar agora?"
+            )
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "btn_do_clear_files":
+            res = database.clear_user_files(user_id)
+            freed_mb = res["freed_bytes"] / (1024 * 1024)
+            await query.answer(f"Limpeza concluída! {freed_mb:.2f} MB liberados.", show_alert=True)
+            metrics = get_system_metrics()
+            text = (
+                f"✅ <b>Limpeza Realizada com Sucesso!</b>\n"
+                f"• Arquivos físicos removidos: <b>{res['deleted_files']}</b>\n"
+                f"• Espaço liberado no disco: <b>{freed_mb:.2f} MB</b>\n\n"
+                + format_storage_message(metrics)
+            )
+            await safe_reply(query, text, reply_markup=get_storage_keyboard())
+
+        elif data == "btn_brand_settings":
+            settings = database.get_user_settings(user_id)
+            has_logo = bool(settings["logo_path"] and Path(settings["logo_path"]).exists())
+            theme_info = doc_generator.get_theme(settings["color_theme"])
+            text = (
+                "🏢 <b>Personalização de Marca & Cores</b>\n\n"
+                f"🖼️ <b>Logo da Empresa:</b> {'✅ Ativa' if has_logo else '❌ Nenhuma logo cadastrada'}\n"
+                f"🎨 <b>Paleta de Cores:</b> <b>{theme_info['name']}</b>\n\n"
+                "Personalize a identidade visual dos relatórios gerados pelo bot:"
+            )
+            await safe_reply(query, text, reply_markup=get_brand_keyboard(has_logo))
+
+        elif data == "btn_set_logo":
+            database.set_user_state(user_id, STATE_WAITING_LOGO)
+            text = (
+                "🖼️ <b>Envio de Logo da Empresa</b>\n\n"
+                "Envie agora a imagem do seu logo (PNG ou JPG) aqui no chat.\n"
+                "💡 <i>Recomendado: imagem com fundo transparente ou branco.</i>\n\n"
+                "O bot posicionará o logo automaticamente no topo de todos os seus novos relatórios Word (.docx) e PDF!"
+            )
+            keyboard = [[InlineKeyboardButton("❌ Cancelar", callback_data="btn_brand_settings")]]
+            await safe_reply(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "btn_remove_logo":
+            settings = database.get_user_settings(user_id)
+            if settings["logo_path"] and Path(settings["logo_path"]).exists():
+                try:
+                    Path(settings["logo_path"]).unlink()
+                except Exception:
+                    pass
+            database.update_user_logo(user_id, None)
+            await query.answer("Logo removida com sucesso!", show_alert=True)
+            settings = database.get_user_settings(user_id)
+            theme_info = doc_generator.get_theme(settings["color_theme"])
+            text = (
+                "🏢 <b>Personalização de Marca & Cores</b>\n\n"
+                "🖼️ <b>Logo da Empresa:</b> ❌ Nenhuma logo cadastrada\n"
+                f"🎨 <b>Paleta de Cores:</b> <b>{theme_info['name']}</b>\n\n"
+                "Personalize a aparência dos relatórios:"
+            )
+            await safe_reply(query, text, reply_markup=get_brand_keyboard(False))
+
+        elif data == "btn_choose_color":
+            text = (
+                "🎨 <b>Escolha a Paleta de Cores do Documento</b>\n\n"
+                "Os títulos, tabelas e detalhes visuais dos seus relatórios seguirão a paleta selecionada:"
+            )
+            await safe_reply(query, text, reply_markup=get_color_themes_keyboard())
+
+        elif data.startswith("theme_"):
+            theme_name = data.replace("theme_", "")
+            database.update_user_color_theme(user_id, theme_name)
+            theme_info = doc_generator.get_theme(theme_name)
+            await query.answer(f"Tema alterado para: {theme_info['name']}!", show_alert=True)
+            settings = database.get_user_settings(user_id)
+            has_logo = bool(settings["logo_path"] and Path(settings["logo_path"]).exists())
+            text = (
+                "🏢 <b>Personalização de Marca & Cores</b>\n\n"
+                f"🖼️ <b>Logo da Empresa:</b> {'✅ Ativa' if has_logo else '❌ Nenhuma logo cadastrada'}\n"
+                f"🎨 <b>Paleta de Cores:</b> <b>{theme_info['name']}</b> (Ativa)\n\n"
+                "Seus próximos relatórios serão gerados com este padrão de cores!"
+            )
+            await safe_reply(query, text, reply_markup=get_brand_keyboard(has_logo))
+
     except Exception as e:
         logger.error(f"Erro ao processar callback '{data}': {e}", exc_info=True)
         try:
@@ -474,9 +752,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa mensagens de texto enviadas pelo usuário"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     text = update.message.text.strip()
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
+
+    if current_state == STATE_WAITING_LOGO:
+        await safe_reply(
+            update.message,
+            "⚠️ Por favor, envie uma <b>imagem ou foto</b> (PNG ou JPG) com o logo da sua empresa.\n"
+            "Ou envie /cancelar para voltar ao menu principal.",
+            reply_markup=get_main_keyboard()
+        )
+        return
 
     if current_state == STATE_WAITING_TEMPLATE:
         await process_template_creation(update.message, context, user_id, raw_text=text)
@@ -491,6 +781,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa fotos enviadas pelo usuário (notas fiscais, recibos, fotos de relatórios, etc.)"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
     
@@ -498,9 +791,27 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     photo = update.message.photo[-1]
     caption = (update.message.caption or "").strip()
     
-    status_msg = await update.message.reply_text("📥 Recebendo foto...")
+    status_msg = await update.message.reply_text("📥 Recebendo imagem...")
     file = await context.bot.get_file(photo.file_id)
     
+    # Se estiver aguardando envio de logo
+    if current_state == STATE_WAITING_LOGO:
+        logo_path = config.LOGOS_DIR / f"logo_{user_id}.png"
+        await file.download_to_drive(str(logo_path))
+        database.update_user_logo(user_id, str(logo_path))
+        database.set_user_state(user_id, STATE_IDLE)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await safe_reply(
+            update.message,
+            "✅ <b>Logo da empresa cadastrado com sucesso!</b>\n\n"
+            "A sua logomarca agora será inserida no topo de todos os seus novos relatórios em Word (.docx) e PDF.",
+            reply_markup=get_brand_keyboard(has_logo=True)
+        )
+        return
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = f"{timestamp}_photo_{photo.file_unique_id}.jpg"
     local_path = config.UPLOADS_DIR / safe_name
@@ -553,10 +864,46 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa documentos enviados (.docx, .pdf, .txt, fotos como arquivo, etc.)"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
     doc = update.message.document
     caption = (update.message.caption or "").strip()
+
+    # Verifica se o documento é uma imagem (.png, .jpg, etc.)
+    mime = getattr(doc, "mime_type", "") or ""
+    file_name_lower = (doc.file_name or "").lower()
+    is_image = mime.startswith("image/") or file_name_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"))
+
+    if current_state == STATE_WAITING_LOGO:
+        if is_image:
+            status_msg = await update.message.reply_text("📥 Salvando a logo da sua empresa...")
+            file = await context.bot.get_file(doc.file_id)
+            ext = Path(doc.file_name or "logo.png").suffix or ".png"
+            logo_path = config.LOGOS_DIR / f"logo_{user_id}{ext}"
+            await file.download_to_drive(str(logo_path))
+            database.update_user_logo(user_id, str(logo_path))
+            database.set_user_state(user_id, STATE_IDLE)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await safe_reply(
+                update.message,
+                "✅ <b>Logo da empresa cadastrado com sucesso!</b>\n\n"
+                "A sua logomarca agora será inserida no topo de todos os seus novos relatórios em Word (.docx) e PDF.",
+                reply_markup=get_brand_keyboard(has_logo=True)
+            )
+            return
+        else:
+            await safe_reply(
+                update.message,
+                "⚠️ O arquivo enviado não é uma imagem válida. Por favor, envie uma imagem PNG ou JPG para sua logo.",
+                reply_markup=get_brand_keyboard(False)
+            )
+            return
 
     # Faz o download do arquivo
     status_msg = await update.message.reply_text("📥 Recebendo arquivo...")
@@ -570,11 +917,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await status_msg.delete()
     except Exception:
         pass
-
-    # Verifica se o documento é uma imagem (.png, .jpg, etc.)
-    mime = getattr(doc, "mime_type", "") or ""
-    file_name_lower = (doc.file_name or "").lower()
-    is_image = mime.startswith("image/") or file_name_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"))
 
     context.user_data["last_uploaded_file"] = str(local_path)
     context.bot_data[f"file_{doc.file_id}"] = str(local_path)
@@ -625,33 +967,83 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     text = f"{emoji} Recebi o arquivo: <code>{doc_escaped}</code>\n\nComo você deseja utilizá-lo?"
     await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa mensagens de voz e arquivos de áudio enviados pelo usuário via Gemini multimodal"""
+    user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    current_state = database.get_user_state(user_id)
+
+    audio_obj = update.message.voice or update.message.audio
+    if not audio_obj:
+        return
+
+    caption = (update.message.caption or "").strip()
+    status_msg = await update.message.reply_text("🎙️ Recebendo áudio...")
+    file = await context.bot.get_file(audio_obj.file_id)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ext = ".ogg"
+    if hasattr(audio_obj, "file_name") and audio_obj.file_name:
+        ext = Path(audio_obj.file_name).suffix or ".ogg"
+    safe_name = f"{timestamp}_audio_{audio_obj.file_unique_id}{ext}"
+    local_path = config.UPLOADS_DIR / safe_name
+    await file.download_to_drive(str(local_path))
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    context.user_data["last_uploaded_audio"] = str(local_path)
+    context.user_data["last_uploaded_file"] = str(local_path)
+
+    if current_state == STATE_WAITING_TEMPLATE:
+        await process_template_creation(update.message, context, user_id, audio_paths=[local_path], raw_text=caption)
+        return
+
+    if current_state == STATE_WAITING_ADJUSTMENT:
+        await process_report_adjustment(update.message, context, user_id, feedback_text=caption, audio_paths=[local_path])
+        return
+
+    # Em WAITING_REPORT_INPUT ou envio direto de áudio no chat
+    await process_report_generation(update.message, context, user_id, audio_paths=[local_path], raw_text=caption)
+
 async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
                                     file_path: Optional[Path] = None,
                                     raw_text: Optional[str] = None,
-                                    image_paths: Optional[List[Path]] = None):
-    """Cria e salva um novo modelo de estilo a partir de arquivo, foto ou texto"""
+                                    image_paths: Optional[List[Path]] = None,
+                                    audio_paths: Optional[List[Path]] = None):
+    """Cria e salva um novo modelo de estilo a partir de arquivo, foto, áudio ou texto"""
     status_msg = await message.reply_text("🤖 A I.A Gemini está analisando o layout e a estrutura do seu modelo...")
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     try:
         sample_content = ""
         if file_path:
-            sample_content = parsers.extract_text_from_file(file_path)
+            sample_content = await asyncio.to_thread(parsers.extract_text_from_file, file_path)
         elif raw_text:
             sample_content = raw_text
 
-        if not sample_content.strip() and not image_paths:
-            await status_msg.edit_text("⚠️ Não foi possível encontrar texto ou imagem para analisar.")
+        if not sample_content.strip() and not image_paths and not audio_paths:
+            await status_msg.edit_text("⚠️ Não foi possível encontrar texto, imagem ou áudio para analisar.")
             return
 
-        result = gemini_service.analyze_and_extract_style(
+        result = await asyncio.to_thread(
+            gemini_service.analyze_and_extract_style,
             sample_text=sample_content,
             image_paths=image_paths,
+            audio_paths=audio_paths,
             user_hints=raw_text or ""
         )
         tpl_name = result["name"]
         style_guide = result["style_instructions"]
 
-        database.save_template(user_id, tpl_name, style_guide, (sample_content or "Modelo baseado em imagem")[:3000])
+        database.save_template(user_id, tpl_name, style_guide, (sample_content or "Modelo baseado em mídia")[:3000])
         database.set_user_state(user_id, STATE_IDLE)
 
         try:
@@ -665,7 +1057,7 @@ async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE,
             f"✅ <b>Novo Modelo Salvo e Ativado com Sucesso!</b>\n\n"
             f"🏷️ <b>Nome</b>: <code>{tpl_escaped}</code>\n\n"
             f"📋 <b>Estrutura identificada pela I.A:</b>\n<code>{guide_escaped}</code>\n\n"
-            "Agora qualquer dado, texto ou foto que você enviar será formatado neste padrão!"
+            "Agora qualquer dado, texto, foto ou áudio que você enviar será formatado neste padrão!"
         )
         await safe_reply(message, response_text, reply_markup=get_main_keyboard())
 
@@ -679,33 +1071,52 @@ async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE,
 async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
                                     file_path: Optional[Path] = None,
                                     raw_text: Optional[str] = None,
-                                    image_paths: Optional[List[Path]] = None):
-    """Gera o relatório com Gemini e cria os arquivos DOCX, PDF e TXT, incorporando fotos/anexos"""
-    status_msg = await message.reply_text("🧠 <b>Gerando seu relatório com a I.A Gemini...</b>\nAguarde alguns instantes.", parse_mode="HTML")
+                                    image_paths: Optional[List[Path]] = None,
+                                    audio_paths: Optional[List[Path]] = None):
+    """Gera o relatório com Gemini e cria os arquivos DOCX, PDF e TXT, incorporando fotos/anexos e personalizações"""
+    status_msg = await message.reply_text("🧠 <b>Processando dados com a I.A Gemini...</b>\nAguarde alguns instantes.", parse_mode="HTML")
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     try:
         content_to_process = ""
         if file_path:
-            content_to_process = parsers.extract_text_from_file(file_path)
+            content_to_process = await asyncio.to_thread(parsers.extract_text_from_file, file_path)
         elif raw_text:
             content_to_process = raw_text
 
-        if not content_to_process.strip() and not image_paths:
-            await status_msg.edit_text("⚠️ Não há conteúdo ou dados para gerar o relatório.")
+        if not content_to_process.strip() and not image_paths and not audio_paths:
+            await status_msg.edit_text("⚠️ Não há conteúdo, dados, fotos ou áudios para gerar o relatório.")
             return
 
         if not content_to_process.strip():
-            content_to_process = "Extraia detalhadamente todos os dados, tabelas, recibos, números e informações contidas na(s) foto(s)/imagem(ns) anexa(s) e gere um relatório executivo completo."
+            if audio_paths and not image_paths:
+                content_to_process = "Transcreva e interprete fielmente tudo o que foi falado no áudio anexo e gere um relatório executivo estruturado com todos os dados, números e decisões."
+            elif image_paths and not audio_paths:
+                content_to_process = "Extraia detalhadamente todos os dados, tabelas, recibos, números e informações contidas na(s) foto(s)/imagem(ns) anexa(s) e gere um relatório executivo completo."
+            elif image_paths and audio_paths:
+                content_to_process = "Analise o áudio explicativo em conjunto com as fotos/imagens fornecidas, combinando todos os dados visíveis e falados em um relatório executivo completo."
 
         active_tpl = database.get_active_template(user_id)
         if not active_tpl:
             active_tpl = {"style_instructions": "Estrutura profissional padrão com Título, Resumo, Indicadores e Conclusão."}
 
-        # Gera o relatório em Markdown com Gemini passando image_paths
-        generated_md = gemini_service.generate_report(
+        # Recupera configurações de marca e tema do usuário
+        user_settings = database.get_user_settings(user_id)
+        user_logo = user_settings.get("logo_path")
+        if user_logo and not Path(user_logo).exists():
+            user_logo = None
+        color_theme = user_settings.get("color_theme", "navy")
+
+        # Gera o relatório em Markdown com Gemini de forma assíncrona
+        generated_md = await asyncio.to_thread(
+            gemini_service.generate_report,
             raw_content=content_to_process,
             style_instructions=active_tpl["style_instructions"],
-            image_paths=image_paths
+            image_paths=image_paths,
+            audio_paths=audio_paths
         )
 
         # Identifica o título do relatório (primeira linha com #)
@@ -726,9 +1137,29 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
         pdf_path = config.OUTPUTS_DIR / f"{base_name}.pdf"
         txt_path = config.OUTPUTS_DIR / f"{base_name}.txt"
 
-        doc_generator.create_docx_report(generated_md, docx_path, title_hint=title, image_paths=image_paths)
-        doc_generator.create_pdf_report(generated_md, pdf_path, title_hint=title, image_paths=image_paths)
-        doc_generator.create_txt_report(generated_md, txt_path)
+        await asyncio.to_thread(
+            doc_generator.create_docx_report,
+            markdown_text=generated_md,
+            output_path=docx_path,
+            title_hint=title,
+            image_paths=image_paths,
+            logo_path=user_logo,
+            color_theme=color_theme
+        )
+        await asyncio.to_thread(
+            doc_generator.create_pdf_report,
+            markdown_text=generated_md,
+            output_path=pdf_path,
+            title_hint=title,
+            image_paths=image_paths,
+            logo_path=user_logo,
+            color_theme=color_theme
+        )
+        await asyncio.to_thread(
+            doc_generator.create_txt_report,
+            markdown_text=generated_md,
+            output_path=txt_path
+        )
 
         # Salva no banco de dados
         database.save_report(
@@ -748,6 +1179,11 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
         except Exception:
             pass
 
+        try:
+            await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        except Exception:
+            pass
+
         # Envia os documentos gerados diretamente para o usuário
         with open(docx_path, "rb") as f_docx:
             await message.reply_document(f_docx, filename=f"{clean_title}.docx", caption=f"📄 {title} (.docx)")
@@ -757,10 +1193,11 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
 
         # Envia prévia e opções de ação
         title_escaped = html.escape(title)
-        img_badge = "\n<i>📸 Fotos e anexos foram incluídos ao final do documento!</i>" if image_paths else ""
+        img_badge = "\n<i>📸 Fotos e anexos foram incluídos no documento!</i>" if image_paths else ""
+        aud_badge = "\n<i>🎙️ Áudio transcrito e estruturado pela I.A!</i>" if audio_paths else ""
         preview_text = (
             f"✨ <b>Relatório Gerado com Sucesso!</b>\n\n"
-            f"📌 <b>{title_escaped}</b>{img_badge}\n\n"
+            f"📌 <b>{title_escaped}</b>{img_badge}{aud_badge}\n\n"
             "Você pode baixar os arquivos acima ou solicitar alterações instantâneas clicando em <b>Ajustar / Refinar</b> abaixo:"
         )
         await safe_reply(message, preview_text, reply_markup=get_report_actions_keyboard())
@@ -777,9 +1214,14 @@ async def process_report_generation(message, context: ContextTypes.DEFAULT_TYPE,
 
 async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
                                     feedback_text: Optional[str] = None,
-                                    image_paths: Optional[List[Path]] = None):
-    """Aplica ajustes ao último relatório gerado, aceitando instruções em texto ou fotos adicionais"""
+                                    image_paths: Optional[List[Path]] = None,
+                                    audio_paths: Optional[List[Path]] = None):
+    """Aplica ajustes ao último relatório gerado, aceitando instruções em texto, fotos ou áudios"""
     status_msg = await message.reply_text("🔄 <b>Aplicando seus ajustes ao relatório...</b>", parse_mode="HTML")
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     try:
         report = database.get_latest_report(user_id)
@@ -791,15 +1233,28 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
         style_guide = active_tpl["style_instructions"] if active_tpl else ""
 
         fb = feedback_text or ""
-        if not fb and image_paths:
-            fb = "Incorpore as novas informações e dados visíveis na(s) imagem(ns) anexa(s)."
+        if not fb:
+            if audio_paths and not image_paths:
+                fb = "Aplique os ajustes e correções ditados no áudio anexo."
+            elif image_paths and not audio_paths:
+                fb = "Incorpore as novas informações e dados visíveis na(s) imagem(ns) anexa(s)."
+            elif audio_paths and image_paths:
+                fb = "Aplique os ajustes solicitados com base no áudio e imagens anexas."
 
-        # Refina com Gemini
-        updated_md = gemini_service.refine_report(
+        user_settings = database.get_user_settings(user_id)
+        user_logo = user_settings.get("logo_path")
+        if user_logo and not Path(user_logo).exists():
+            user_logo = None
+        color_theme = user_settings.get("color_theme", "navy")
+
+        # Refina com Gemini em thread assíncrona
+        updated_md = await asyncio.to_thread(
+            gemini_service.refine_report,
             current_report=report["generated_content"],
             feedback=fb,
             style_instructions=style_guide,
-            image_paths=image_paths
+            image_paths=image_paths,
+            audio_paths=audio_paths
         )
 
         # Atualiza arquivos
@@ -819,9 +1274,29 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
         pdf_path = config.OUTPUTS_DIR / f"{base_name}.pdf"
         txt_path = config.OUTPUTS_DIR / f"{base_name}.txt"
 
-        doc_generator.create_docx_report(updated_md, docx_path, title_hint=title, image_paths=image_paths)
-        doc_generator.create_pdf_report(updated_md, pdf_path, title_hint=title, image_paths=image_paths)
-        doc_generator.create_txt_report(updated_md, txt_path)
+        await asyncio.to_thread(
+            doc_generator.create_docx_report,
+            markdown_text=updated_md,
+            output_path=docx_path,
+            title_hint=title,
+            image_paths=image_paths,
+            logo_path=user_logo,
+            color_theme=color_theme
+        )
+        await asyncio.to_thread(
+            doc_generator.create_pdf_report,
+            markdown_text=updated_md,
+            output_path=pdf_path,
+            title_hint=title,
+            image_paths=image_paths,
+            logo_path=user_logo,
+            color_theme=color_theme
+        )
+        await asyncio.to_thread(
+            doc_generator.create_txt_report,
+            markdown_text=updated_md,
+            output_path=txt_path
+        )
 
         database.update_latest_report(
             report["id"],
@@ -834,6 +1309,11 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
         database.set_user_state(user_id, STATE_IDLE)
         try:
             await status_msg.delete()
+        except Exception:
+            pass
+
+        try:
+            await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
         except Exception:
             pass
 
@@ -860,14 +1340,18 @@ async def process_report_adjustment(message, context: ContextTypes.DEFAULT_TYPE,
 async def cmd_modelo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /modelo"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     database.set_user_state(user_id, STATE_WAITING_TEMPLATE)
     text = (
         "🎨 <b>Configuração de Estilo / Layout</b>\n\n"
         "Envie agora:\n"
         "1. Uma <b>foto ou imagem</b> de um modelo de relatório que você gosta;\n"
-        "2. Um <b>arquivo</b> (.pdf, .docx, .txt) com um modelo/exemplo; OU\n"
-        "3. Uma <b>mensagem de texto</b> explicando como você deseja seu relatório (ex: <i>'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal'</i>).\n\n"
+        "2. Um <b>arquivo</b> (.pdf, .docx, .txt) com um modelo/exemplo;\n"
+        "3. Um <b>áudio ou mensagem de voz</b> descrevendo o estilo desejado; OU\n"
+        "4. Uma <b>mensagem de texto</b> explicando como você deseja seu relatório (ex: <i>'Quero seções: Resumo, Destaques, Tabela de Indicadores, Ações. Tom executivo formal'</i>).\n\n"
         "🤖 A I.A analisará o layout e salvará como seu padrão!"
     )
     keyboard = [
@@ -878,6 +1362,9 @@ async def cmd_modelo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_meus_modelos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /meus_modelos"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     templates = database.get_user_templates(user_id)
     if not templates:
@@ -901,6 +1388,9 @@ async def cmd_meus_modelos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /ajustar"""
     user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     report = database.get_latest_report(user_id)
     if not report:
@@ -909,12 +1399,59 @@ async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_user_state(user_id, STATE_WAITING_ADJUSTMENT)
     text = (
         "✏️ <b>Solicitar Ajustes no Relatório</b>\n\n"
-        "Descreva o que deseja mudar (ex: <i>'Deixe o texto mais resumido', 'Adicione uma coluna de Responsável na tabela', 'Remova a seção de riscos'</i>)."
+        "Descreva o que deseja mudar por texto ou áudio (ex: <i>'Deixe o texto mais resumido', 'Adicione uma coluna de Responsável na tabela', 'Remova a seção de riscos'</i>)."
     )
     keyboard = [
         [InlineKeyboardButton("❌ Cancelar Ajuste", callback_data="btn_main_menu")]
     ]
     await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def cmd_armazenamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /armazenamento ou /disco"""
+    user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    metrics = get_system_metrics()
+    text = format_storage_message(metrics)
+    await safe_reply(update.message, text, reply_markup=get_storage_keyboard())
+
+async def cmd_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /limpar"""
+    user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+    keyboard = [
+        [InlineKeyboardButton("⚠️ Sim, Esvaziar Arquivos", callback_data="btn_do_clear_files")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="btn_storage_status")]
+    ]
+    text = (
+        "🗑️ <b>Confirmação de Limpeza de Arquivos</b>\n\n"
+        "Isso irá apagar permanentemente do servidor os arquivos físicos gerados (Word .docx, PDF, TXT) e anexos temporários.\n\n"
+        "✅ <i>O histórico textual dos relatórios continuará salvo no seu banco de dados.</i>\n\n"
+        "Deseja esvaziar agora?"
+    )
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def cmd_marca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /marca ou /cores"""
+    user_id = update.effective_user.id
+    if not config.is_user_allowed(user_id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+    database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    settings = database.get_user_settings(user_id)
+    has_logo = bool(settings["logo_path"] and Path(settings["logo_path"]).exists())
+    theme_info = doc_generator.get_theme(settings["color_theme"])
+    text = (
+        "🏢 <b>Personalização de Marca & Cores</b>\n\n"
+        f"🖼️ <b>Logo da Empresa:</b> {'✅ Ativa' if has_logo else '❌ Nenhuma logo cadastrada'}\n"
+        f"🎨 <b>Paleta de Cores:</b> <b>{theme_info['name']}</b>\n\n"
+        "Personalize a identidade visual dos relatórios gerados pelo bot:"
+    )
+    await safe_reply(update.message, text, reply_markup=get_brand_keyboard(has_logo))
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Captura qualquer exceção não tratada e registra no log"""
@@ -1041,6 +1578,24 @@ def _keep_alive_worker(target_url: str):
             logger.debug(f"Aviso Auto Keep-Alive: {e}")
         time.sleep(600)
 
+def _auto_cleaner_worker():
+    """Thread em segundo plano que executa a limpeza de arquivos expirados periodicamente"""
+    logger.info(f"Auto-limpeza ativada: expurgo de arquivos com mais de {config.AUTO_CLEAN_HOURS}h a cada hora.")
+    while True:
+        try:
+            time.sleep(3600)  # Executa a cada 1 hora
+            res = database.clean_expired_files(max_age_hours=config.AUTO_CLEAN_HOURS)
+            if res["deleted_files"] > 0:
+                freed_mb = res["freed_bytes"] / (1024 * 1024)
+                logger.info(f"Auto-limpeza executada: {res['deleted_files']} arquivos antigos removidos ({freed_mb:.2f} MB liberados).")
+        except Exception as e:
+            logger.error(f"Erro na rotina de auto-limpeza: {e}")
+
+def start_auto_cleaner():
+    """Inicia thread de limpeza automática em segundo plano"""
+    t = threading.Thread(target=_auto_cleaner_worker, daemon=True)
+    t.start()
+
 def start_keep_alive():
     """Verifica se há URL externa (Render, Koyeb ou variável customizada) e ativa o auto-ping"""
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL") or os.getenv("APP_URL")
@@ -1064,6 +1619,7 @@ def start_health_check_server():
 def main():
     """Inicia o Bot Telegram"""
     start_health_check_server()
+    start_auto_cleaner()
     database.init_db()
 
     missing = config.check_config()
@@ -1080,8 +1636,8 @@ def main():
         BOT_STATE["last_error"] = err_msg
         print("\n" + "="*70)
         print("❌ ATENÇÃO: TELEGRAM_BOT_TOKEN não foi configurado!")
-        print("Se você estiver rodando na NUVEM (ex: Render, Railway, Koyeb):")
-        print("👉 Acesse o painel da sua hospedagem, vá em 'Environment' ou 'Variables'")
+        print("Se você estiver rodando na NUVEM (ex: Render, Railway, Koyeb, Alwaysdata):")
+        print("👉 Acesse o painel ou console SSH e edite o arquivo .env")
         print("👉 Adicione TELEGRAM_BOT_TOKEN com o token do seu bot")
         print("👉 Adicione GEMINI_API_KEY com sua chave do Google AI Studio")
         print("Se estiver rodando LOCALMENTE no seu computador:")
@@ -1112,13 +1668,19 @@ def main():
     app.add_handler(CommandHandler("modelo", cmd_modelo))
     app.add_handler(CommandHandler("meus_modelos", cmd_meus_modelos))
     app.add_handler(CommandHandler("ajustar", cmd_ajustar))
+    app.add_handler(CommandHandler("armazenamento", cmd_armazenamento))
+    app.add_handler(CommandHandler("disco", cmd_armazenamento))
+    app.add_handler(CommandHandler("limpar", cmd_limpar))
+    app.add_handler(CommandHandler("marca", cmd_marca))
+    app.add_handler(CommandHandler("cores", cmd_marca))
 
     # Callbacks inline dos botões
     app.add_handler(CallbackQueryHandler(handle_callback_query))
 
-    # Mensagens de fotos, documentos e texto
+    # Mensagens de fotos, documentos, áudios e texto
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     BOT_STATE["is_running"] = True
@@ -1134,4 +1696,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

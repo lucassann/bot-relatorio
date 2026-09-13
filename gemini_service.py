@@ -40,9 +40,40 @@ def _prepare_image_parts(image_paths: Optional[List[Path]]) -> List[types.Part]:
                 logger.error(f"Erro ao carregar imagem {img_p}: {e}")
     return parts
 
-def analyze_and_extract_style(sample_text: str = "", image_paths: Optional[List[Path]] = None, user_hints: str = "") -> Dict[str, str]:
+def _prepare_audio_parts(audio_paths: Optional[List[Path]]) -> List[types.Part]:
+    """Converte caminhos de áudios (voz gravada, ogg, mp3, wav) em objetos Part do google-genai"""
+    parts = []
+    if not audio_paths:
+        return parts
+
+    for aud_p in audio_paths:
+        p = Path(aud_p)
+        if p.exists():
+            suffix = p.suffix.lower()
+            mime_type = "audio/ogg"
+            if suffix in [".mp3", ".mpeg"]:
+                mime_type = "audio/mp3"
+            elif suffix == ".wav":
+                mime_type = "audio/wav"
+            elif suffix in [".m4a", ".mp4"]:
+                mime_type = "audio/m4a"
+            elif suffix == ".aac":
+                mime_type = "audio/aac"
+            elif suffix in [".ogg", ".oga", ".opus"]:
+                mime_type = "audio/ogg"
+
+            try:
+                with open(p, "rb") as f:
+                    data = f.read()
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+            except Exception as e:
+                logger.error(f"Erro ao carregar áudio {aud_p}: {e}")
+    return parts
+
+def analyze_and_extract_style(sample_text: str = "", image_paths: Optional[List[Path]] = None,
+                              audio_paths: Optional[List[Path]] = None, user_hints: str = "") -> Dict[str, str]:
     """
-    Analisa um documento, texto ou foto/imagem de exemplo para extrair:
+    Analisa um documento, texto, foto ou mensagem de voz de exemplo para extrair:
     - Um nome sugerido para o modelo
     - Regras de layout, estrutura de seções, formatação e tom de voz
     """
@@ -72,6 +103,7 @@ GUIA:
 
     contents = []
     contents.extend(_prepare_image_parts(image_paths))
+    contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(prompt)
 
     candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
@@ -110,21 +142,25 @@ GUIA:
 
     raise RuntimeError(f"Erro ao comunicar com o Gemini: {last_err}")
 
-def generate_report(raw_content: str, style_instructions: str, image_paths: Optional[List[Path]] = None, extra_prompt: str = "") -> str:
+def generate_report(raw_content: str, style_instructions: str,
+                    image_paths: Optional[List[Path]] = None,
+                    audio_paths: Optional[List[Path]] = None,
+                    extra_prompt: str = "") -> str:
     """
     Gera o relatório final aplicando o estilo e layout ativo sobre os dados brutos enviados,
-    com suporte multimodal completo a extração de dados de fotos/imagens.
+    com suporte multimodal completo a extração de dados de fotos/imagens e mensagens de voz/áudio.
     """
     client = get_client()
     if not client:
         raise ValueError("Chave GEMINI_API_KEY não configurada no arquivo .env!")
 
-    system_instruction = """Você é um redator executivo e analista sênior de dados com capacidades avançadas de OCR e visão computacional multimodal.
-Sua missão é transformar rascunhos, dados brutos, anotações, documentos ou FOTOS/IMAGENS (recibos, notas fiscais, relatórios escaneados, dashboards, gráficos, planilhas impressas, lousas ou anotações manuscritas) em um relatório profissional de altíssimo nível.
-Ao analisar imagens ou fotos:
-1. Extraia detalhadamente todos os dados textuais, datas, nomes, tabelas, números, valores financeiros e métricas visíveis.
-2. Integre perfeitamente as informações extraídas das fotos com o texto ou rascunho enviado pelo usuário.
-3. Siga rigorosamente o LAYOUT, ESTRUTURA DE SEÇÕES e ESTILO especificados no Guia de Estilo.
+    system_instruction = """Você é um redator executivo e analista sênior de dados com capacidades avançadas de OCR, visão computacional e transcrição/análise de áudio multimodal.
+Sua missão é transformar rascunhos, dados brutos, anotações, documentos, FOTOS/IMAGENS (recibos, notas fiscais, relatórios escaneados, dashboards, gráficos, planilhas impressas, lousas) ou ÁUDIOS/GRAVAÇÕES DE VOZ em um relatório profissional de altíssimo nível.
+Ao analisar imagens ou áudios:
+1. Em imagens: extraia detalhadamente todos os dados textuais, datas, nomes, tabelas, números, valores financeiros e métricas visíveis.
+2. Em áudios/mensagens de voz: transcreva e interprete fielmente tudo o que foi falado pelo usuário, extraindo metas, valores, decisões, responsáveis e conclusões.
+3. Integre perfeitamente as informações extraídas das fotos e áudios com o texto ou rascunho enviado pelo usuário.
+4. Siga rigorosamente o LAYOUT, ESTRUTURA DE SEÇÕES e ESTILO especificados no Guia de Estilo.
 Formate a resposta em Markdown padrão:
 - Use # para o Título Principal
 - Use ## para Seções Principais
@@ -141,14 +177,14 @@ NÃO inclua blocos ```markdown no início ou fim, apenas o texto do relatório d
 {f'--- PEDIDO ADICIONAL DO USUÁRIO ---\n{extra_prompt}\n--- FIM DO PEDIDO ---' if extra_prompt else ''}
 
 --- DADOS BRUTOS / RASCUNHO FORNECIDOS ---
-{raw_content if raw_content.strip() else '[Dados contidos nas imagens/fotos anexadas]'}
+{raw_content if raw_content.strip() else '[Dados contidos nas imagens, fotos ou áudios/vozes anexados]'}
 --- FIM DOS DADOS BRUTOS ---
 
-Analise com atenção todas as fotos/imagens e textos fornecidos. Extraia minuciosamente todos os números, tabelas, dados e informações visíveis e gere o relatório completo estruturado de acordo com o Guia de Estilo."""
+Analise com atenção todas as fotos/imagens, áudios e textos fornecidos. Extraia minuciosamente todos os números, tabelas, dados e informações e gere o relatório completo estruturado de acordo com o Guia de Estilo."""
 
     contents = []
-    image_parts = _prepare_image_parts(image_paths)
-    contents.extend(image_parts)
+    contents.extend(_prepare_image_parts(image_paths))
+    contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(user_message)
 
     candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
@@ -176,16 +212,18 @@ Analise com atenção todas as fotos/imagens e textos fornecidos. Extraia minuci
 
     raise RuntimeError(f"Erro ao gerar relatório com o Gemini: {last_err}")
 
-def refine_report(current_report: str, feedback: str, style_instructions: str = "", image_paths: Optional[List[Path]] = None) -> str:
+def refine_report(current_report: str, feedback: str, style_instructions: str = "",
+                  image_paths: Optional[List[Path]] = None,
+                  audio_paths: Optional[List[Path]] = None) -> str:
     """
-    Refina ou altera um relatório gerado com base nas correções do usuário e eventuais imagens.
+    Refina ou altera um relatório gerado com base nas correções do usuário e eventuais imagens ou áudios.
     """
     client = get_client()
     if not client:
         raise ValueError("Chave GEMINI_API_KEY não configurada no arquivo .env!")
 
     system_instruction = """Você é um redator executivo e editor sênior.
-Sua tarefa é modificar o relatório existente de acordo com as instruções de ajuste do usuário (e quaisquer dados contidos em fotos/imagens anexadas), mantendo a coerência, o estilo e a formatação profissional em Markdown."""
+Sua tarefa é modificar o relatório existente de acordo com as instruções de ajuste do usuário (e quaisquer dados contidos em fotos/imagens ou áudios anexados), mantendo a coerência, o estilo e a formatação profissional em Markdown."""
 
     prompt = f"""--- RELATÓRIO ATUAL ---
 {current_report}
@@ -197,10 +235,11 @@ Sua tarefa é modificar o relatório existente de acordo com as instruções de 
 {feedback}
 --- FIM DOS AJUSTES ---
 
-Reescreva o relatório completo aplicando pontualmente todos os ajustes solicitados e incorporando os dados das fotos (se houver). Retorne apenas o relatório em Markdown atualizado."""
+Reescreva o relatório completo aplicando pontualmente todos os ajustes solicitados e incorporando os dados das fotos ou áudios (se houver). Retorne apenas o relatório em Markdown atualizado."""
 
     contents = []
     contents.extend(_prepare_image_parts(image_paths))
+    contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(prompt)
 
     candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
