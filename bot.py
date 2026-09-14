@@ -229,18 +229,22 @@ def get_report_actions_keyboard(has_report: bool = True):
 async def safe_reply(target, text: str, reply_markup=None, parse_mode="HTML"):
     """
     Envia resposta com segurança usando HTML ou fallback para texto simples
-    caso ocorra erro de formatação (entidades inválidas).
+    caso ocorra erro de formatação (entidades inválidas) ou erro de teclado.
     """
     dest = getattr(target, "message", target)
     try:
         if hasattr(dest, "reply_text"):
             return await dest.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
-        logger.warning(f"Falha ao enviar com parse_mode={parse_mode}: {e}. Enviando sem formatação...")
+        logger.warning(f"Falha ao enviar com parse_mode={parse_mode}: {e}. Tentando fallback...")
         clean_text = re.sub(r'<[^>]+>', '', text)
         clean_text = clean_text.replace('*', '').replace('`', '').replace('_', '')
         if hasattr(dest, "reply_text"):
-            return await dest.reply_text(clean_text, reply_markup=reply_markup)
+            try:
+                return await dest.reply_text(clean_text, reply_markup=reply_markup)
+            except Exception as e2:
+                logger.warning(f"Falha ao enviar com reply_markup: {e2}. Enviando sem markup...")
+                return await dest.reply_text(clean_text)
 
 async def send_chunked_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, reply_markup=None):
     """Envia mensagens longas divididas em blocos de até 4000 caracteres"""
@@ -309,14 +313,15 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Clique em <i>'🎨 Definir Novo Estilo'</i> ou envie /modelo.\n"
         "Envie um arquivo (Word, PDF, TXT), uma foto ou um áudio explicando a estrutura.\n\n"
         "🔹 <b>Como gerar um relatório?</b>\n"
-        "Clique em <i>'🚀 Novo Relatório'</i> ou envie diretamente no chat:\n"
-        "• 📸 <b>Fotos/Imagens</b>: fotos de notas fiscais, recibos, quadros, tabelas ou anotações (a IA extrai todos os dados com visão computacional!)\n"
+        "Envie /novo ou clique em <i>'🚀 Novo Relatório'</i>, ou envie diretamente no chat:\n"
+        "• 📸 <b>Fotos + Texto Juntos</b>: tire fotos de equipamentos, plaquetas com modelo/número de série, peças ou notas fiscais e digite suas anotações — a IA extrai os dados das fotos e monta seu relatório completo!\n"
         "• 🎙️ <b>Áudios / Mensagens de Voz</b>: envie um áudio e a IA transcreve e gera o documento automaticamente.\n"
         "• ✍️ <b>Texto</b>: rascunhos, dados ou anotações coladas no chat.\n"
         "• 📄 <b>Documentos</b>: arquivos Word, PDF, CSV ou TXT.\n\n"
         "🔹 <b>Como pedir ajustes?</b>\n"
         "Após a geração do relatório, clique em <i>'✏️ Ajustar / Refinar'</i> ou use /ajustar e diga o que mudar.\n\n"
         "🔹 <b>Comandos Rápidos</b>:\n"
+        "• /novo - Iniciar novo relatório (fotos + texto)\n"
         "• /start - Menu Principal\n"
         "• /modelo - Configurar novo modelo de layout\n"
         "• /meus_modelos - Listar e trocar de modelo\n"
@@ -329,6 +334,38 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg:
         await safe_reply(msg, text, reply_markup=get_main_keyboard())
+
+async def cmd_novo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /novo ou /relatorio: inicia a sessão para gerar novo relatório com fotos e/ou texto"""
+    user = update.effective_user
+    if not config.is_user_allowed(user.id):
+        await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
+        return
+
+    user_id = user.id
+    database.get_or_create_user(user_id, user.username, user.first_name)
+    database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
+    context.user_data["report_photos"] = []
+    context.user_data["report_texts"] = []
+    context.user_data["report_audios"] = []
+
+    active_tpl = database.get_active_template(user_id)
+    tpl_name = active_tpl["name"] if active_tpl else "Padrão"
+
+    text = (
+        f"🚀 <b>Criar Novo Relatório</b> (Modelo Ativo: <code>{html.escape(tpl_name)}</code>)\n\n"
+        "Envie suas fotos e anotações para a I.A estruturar seu relatório:\n\n"
+        "📸 <b>Fotos / Imagens</b>: envie fotos de equipamentos, plaquetas técnicas com modelo/série, componentes ou recibos;\n"
+        "✍️ <b>Texto / Anotações</b>: envie observações sobre o atendimento, diagnóstico, testes, peças trocadas, etc.;\n"
+        "🎙️ <b>Áudio de Voz</b>: se preferir, envie áudios explicando a situação.\n\n"
+        "<i>💡 Você pode enviar as fotos primeiro e depois digitar suas anotações. A I.A vai extrair tudo das fotos e juntar com seu texto no relatório!</i>\n\n"
+        "<i>Aguardando fotos ou anotações...</i>"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🧪 Gerar Exemplo de Demonstração", callback_data="btn_example_report")],
+        [InlineKeyboardButton("❌ Cancelar / Menu Principal", callback_data="btn_main_menu")]
+    ]
+    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /cancelar"""
@@ -445,16 +482,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "btn_new_report":
             database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
+            context.user_data["report_photos"] = []
+            context.user_data["report_texts"] = []
+            context.user_data["report_audios"] = []
             active_tpl = database.get_active_template(user_id)
             tpl_name = active_tpl["name"] if active_tpl else "Padrão"
             text = (
                 f"🚀 <b>Criar Novo Relatório</b> (Modelo Ativo: <code>{html.escape(tpl_name)}</code>)\n\n"
                 "Você pode enviar suas informações de várias formas:\n\n"
-                "1. 📸 <b>Fotos / Imagens</b>: tire fotos de notas fiscais, recibos, quadros, tabelas ou anotações (a I.A extrai os dados e anexa as fotos no documento!);\n"
-                "2. ✍️ <b>Digitar ou colar</b> seus dados, anotações ou rascunho aqui no chat;\n"
-                "3. 📄 <b>Enviar um arquivo</b> (.pdf, .docx, .txt, .csv) com as informações;\n"
-                "4. 🧪 <b>Testar agora</b> clicando no botão abaixo para gerar um relatório de demonstração em tempo real!\n\n"
-                "<i>Aguardando seus dados ou fotos...</i>"
+                "1. 📸 <b>Fotos / Imagens</b>: tire fotos de equipamentos, plaquetas com modelo/número de série, componentes, peças danificadas ou notas fiscais (a I.A extrai todos os dados e anexa as fotos no Word/PDF!);\n"
+                "2. ✍️ <b>Texto / Anotações</b>: envie observações do serviço, defeitos encontrados, peças trocadas, etc.;\n"
+                "3. 📄 <b>Arquivos</b>: envie documentos PDF, DOCX, TXT com dados técnicos;\n"
+                "4. 🧪 <b>Testar agora</b>: clique no botão abaixo para gerar um relatório de demonstração em tempo real!\n\n"
+                "<i>💡 Dica: Você pode enviar as fotos primeiro e em seguida digitar as anotações. A I.A vai extrair os dados das fotos e juntar com seu texto no relatório!</i>\n\n"
+                "<i>Aguardando fotos ou anotações...</i>"
             )
             keyboard = [
                 [InlineKeyboardButton("🧪 Gerar Exemplo de Demonstração", callback_data="btn_example_report")],
@@ -584,6 +625,78 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
             await query.answer("Analisando estilo do modelo...")
             await process_template_creation(query.message, context, user_id, file_path=file_path)
+
+        elif data == "btn_gen_pending":
+            photos = [Path(p) for p in context.user_data.get("report_photos", []) if Path(p).exists()]
+            texts = "\n\n".join(context.user_data.get("report_texts", []))
+            audios = [Path(p) for p in context.user_data.get("report_audios", []) if Path(p).exists()]
+
+            if not photos and context.user_data.get("last_uploaded_photo"):
+                lp = Path(context.user_data["last_uploaded_photo"])
+                if lp.exists():
+                    photos = [lp]
+
+            if not photos and not texts and not audios:
+                await query.answer("Nenhum dado ou foto pendente.", show_alert=True)
+                await safe_reply(query, "⚠️ Nenhuma foto ou texto encontrado. Envie suas fotos ou anotações no chat.", reply_markup=get_main_keyboard())
+                return
+
+            context.user_data["report_photos"] = []
+            context.user_data["report_texts"] = []
+            context.user_data["report_audios"] = []
+            database.set_user_state(user_id, STATE_IDLE)
+
+            await query.answer("Iniciando extração e geração de relatório...")
+            await process_report_generation(
+                query.message,
+                context,
+                user_id,
+                image_paths=photos if photos else None,
+                raw_text=texts if texts else None,
+                audio_paths=audios if audios else None
+            )
+
+        elif data == "btn_tpl_pending":
+            photos = [Path(p) for p in context.user_data.get("report_photos", []) if Path(p).exists()]
+            if not photos and context.user_data.get("last_uploaded_photo"):
+                lp = Path(context.user_data["last_uploaded_photo"])
+                if lp.exists():
+                    photos = [lp]
+            if not photos:
+                await query.answer("Nenhuma foto encontrada.", show_alert=True)
+                return
+            context.user_data["report_photos"] = []
+            context.user_data["report_texts"] = []
+            context.user_data["report_audios"] = []
+            database.set_user_state(user_id, STATE_IDLE)
+            await query.answer("Analisando estilo da foto...")
+            await process_template_creation(query.message, context, user_id, image_paths=photos)
+
+        elif data == "btn_clear_pending":
+            context.user_data["report_photos"] = []
+            context.user_data["report_texts"] = []
+            context.user_data["report_audios"] = []
+            database.set_user_state(user_id, STATE_IDLE)
+            await query.answer("Rascunho cancelado.")
+            await safe_reply(query, "❌ <b>Operação cancelada.</b> O rascunho de fotos e dados foi limpo.", reply_markup=get_main_keyboard())
+
+        elif data == "btn_gen_doc":
+            doc_p_str = context.user_data.get("pending_file") or context.user_data.get("last_uploaded_file")
+            if not doc_p_str or not Path(doc_p_str).exists():
+                await query.answer("Documento não encontrado.", show_alert=True)
+                return
+            database.set_user_state(user_id, STATE_IDLE)
+            await query.answer("Iniciando relatório com documento...")
+            await process_report_generation(query.message, context, user_id, file_path=Path(doc_p_str))
+
+        elif data == "btn_tpl_doc":
+            doc_p_str = context.user_data.get("pending_file") or context.user_data.get("last_uploaded_file")
+            if not doc_p_str or not Path(doc_p_str).exists():
+                await query.answer("Documento não encontrado.", show_alert=True)
+                return
+            database.set_user_state(user_id, STATE_IDLE)
+            await query.answer("Analisando modelo do documento...")
+            await process_template_creation(query.message, context, user_id, file_path=Path(doc_p_str))
 
         elif data.startswith("act_pgen_"):
             file_id = data.replace("act_pgen_", "")
@@ -750,7 +863,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processa mensagens de texto enviadas pelo usuário"""
+    """Processa mensagens de texto enviadas pelo usuário com integração total a fotos pendentes"""
     user_id = update.effective_user.id
     if not config.is_user_allowed(user_id):
         await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
@@ -770,30 +883,76 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if current_state == STATE_WAITING_TEMPLATE:
         await process_template_creation(update.message, context, user_id, raw_text=text)
+        return
 
-    elif current_state == STATE_WAITING_ADJUSTMENT:
+    if current_state == STATE_WAITING_ADJUSTMENT:
         await process_report_adjustment(update.message, context, user_id, feedback_text=text)
+        return
 
-    else:
-        # Por padrão no estado normal (ou WAITING_REPORT_INPUT), se o usuário enviar texto, geramos o relatório!
-        await process_report_generation(update.message, context, user_id, raw_text=text)
+    # Verifica se existem fotos pendentes no rascunho do relatório
+    pending_photos = [Path(p) for p in context.user_data.get("report_photos", []) if Path(p).exists()]
+
+    if pending_photos:
+        # Usuário enviou foto(s) e agora digitou suas observações de texto!
+        context.user_data.setdefault("report_texts", []).append(text)
+        all_texts = "\n\n".join(context.user_data.get("report_texts", []))
+        all_audios = [Path(p) for p in context.user_data.get("report_audios", []) if Path(p).exists()]
+        photos_to_use = list(pending_photos)
+
+        # Limpa o rascunho pendente
+        context.user_data["report_photos"] = []
+        context.user_data["report_texts"] = []
+        context.user_data["report_audios"] = []
+        database.set_user_state(user_id, STATE_IDLE)
+
+        # Dispara a geração combinando foto(s) + texto
+        await process_report_generation(
+            update.message,
+            context,
+            user_id,
+            image_paths=photos_to_use,
+            raw_text=all_texts,
+            audio_paths=all_audios if all_audios else None
+        )
+        return
+
+    if current_state == STATE_WAITING_REPORT_INPUT:
+        # Usuário iniciou novo relatório e enviou o texto primeiro
+        context.user_data.setdefault("report_texts", []).append(text)
+        text_preview = text[:150] + ("..." if len(text) > 150 else "")
+        msg = (
+            f"📝 <b>Anotações de texto recebidas!</b>\n"
+            f"<i>'{html.escape(text_preview)}'</i>\n\n"
+            "Deseja enviar <b>fotos do equipamento ou serviço</b> (plaqueta técnica, modelo, defeito) para a I.A extrair dados técnicos?\n\n"
+            "• 📸 <b>Envie as fotos agora</b> aqui no chat;\n"
+            "• 🚀 <b>Ou clique abaixo para gerar o relatório imediatamente</b> apenas com o texto."
+        )
+        keyboard = [
+            [InlineKeyboardButton("🚀 Gerar Relatório Agora (Apenas Texto)", callback_data="btn_gen_pending")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="btn_clear_pending")]
+        ]
+        await safe_reply(update.message, msg, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Estado IDLE comum: se o usuário simplesmente enviar texto no chat, gera diretamente
+    await process_report_generation(update.message, context, user_id, raw_text=text)
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processa fotos enviadas pelo usuário (notas fiscais, recibos, fotos de relatórios, etc.)"""
+    """Processa fotos enviadas pelo usuário (notas fiscais, recibos, fotos de relatórios, plaquetas de equipamentos, etc.)"""
     user_id = update.effective_user.id
     if not config.is_user_allowed(user_id):
         await update.message.reply_text("⛔ Desculpe, seu usuário não está autorizado a utilizar este bot.")
         return
     database.get_or_create_user(user_id, update.effective_user.username, update.effective_user.first_name)
     current_state = database.get_user_state(user_id)
-    
+
     # Foto de maior resolução
     photo = update.message.photo[-1]
     caption = (update.message.caption or "").strip()
-    
+
     status_msg = await update.message.reply_text("📥 Recebendo imagem...")
     file = await context.bot.get_file(photo.file_id)
-    
+
     # Se estiver aguardando envio de logo
     if current_state == STATE_WAITING_LOGO:
         logo_path = config.LOGOS_DIR / f"logo_{user_id}.png"
@@ -831,35 +990,53 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await process_template_creation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
         return
 
-    # Se estava esperando entrada de relatório explicitamente
-    if current_state == STATE_WAITING_REPORT_INPUT:
-        await process_report_generation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
-        return
-
-    # Se estava esperando ajuste
+    # Se estava esperando ajuste de relatório existente
     if current_state == STATE_WAITING_ADJUSTMENT:
         await process_report_adjustment(update.message, context, user_id, feedback_text=caption, image_paths=[local_path])
         return
 
-    # Se enviou a foto diretamente sem comando prévio
+    # SESSÃO DE CRIAÇÃO DE RELATÓRIO COM FOTOS + TEXTO
+    database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
+    photos = context.user_data.setdefault("report_photos", [])
+    photos.append(local_path)
+    if caption:
+        context.user_data.setdefault("report_texts", []).append(caption)
+
+    # Debounce para álbuns de fotos (media_group_id)
+    media_group_id = update.message.media_group_id
+    if media_group_id:
+        context.user_data["last_mg_id"] = media_group_id
+        await asyncio.sleep(0.5)
+        if context.user_data.get("last_mg_handled") == media_group_id:
+            return
+        context.user_data["last_mg_handled"] = media_group_id
+
+    total_photos = len([p for p in context.user_data.get("report_photos", []) if Path(p).exists()])
+    current_texts = "\n\n".join(context.user_data.get("report_texts", []))
+
+    text_info = f"\n📝 <b>Anotações incluídas:</b> <i>'{html.escape(current_texts[:140])}{'...' if len(current_texts) > 140 else ''}'</i>\n" if current_texts else ""
+
     keyboard = [
         [
-            InlineKeyboardButton("📊 Extrair Dados e Gerar Relatório", callback_data=f"act_pgen_{photo.file_id}")
+            InlineKeyboardButton("🚀 Gerar Relatório Agora", callback_data="btn_gen_pending")
         ],
         [
-            InlineKeyboardButton("🎨 Usar como Modelo de Estilo", callback_data=f"act_ptpl_{photo.file_id}")
+            InlineKeyboardButton("🎨 Usar Foto como Modelo de Estilo", callback_data="btn_tpl_pending")
         ],
         [
-            InlineKeyboardButton("❌ Cancelar", callback_data="btn_main_menu")
+            InlineKeyboardButton("❌ Limpar / Cancelar", callback_data="btn_clear_pending")
         ]
     ]
-    caption_text = f"\nLegenda informada: <i>'{html.escape(caption)}'</i>\n" if caption else ""
-    text = (
-        f"📸 <b>Foto recebida com sucesso!</b>\n{caption_text}\n"
-        "A I.A multimodal Gemini pode extrair notas fiscais, recibos, dados de tabelas e anotações diretamente desta foto.\n\n"
-        "Como você deseja utilizá-la?"
+
+    reply_text = (
+        f"📸 <b>{total_photos} foto(s) anexada(s) com sucesso!</b>\n{text_info}\n"
+        "A I.A multimodal extrairá automaticamente das fotos: modelo, número de série, fabricante, especificações técnicas e medições.\n\n"
+        "<b>Como deseja prosseguir?</b>\n"
+        "• ✍️ <b>Envie suas observações / anotações de texto</b> aqui no chat para complementar o relatório;\n"
+        "• 📸 <b>Envie mais fotos</b> se desejar;\n"
+        "• 🚀 <b>Ou clique abaixo para gerar o relatório agora!</b>"
     )
-    await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await safe_reply(update.message, reply_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa documentos enviados (.docx, .pdf, .txt, fotos como arquivo, etc.)"""
@@ -908,7 +1085,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     # Faz o download do arquivo
     status_msg = await update.message.reply_text("📥 Recebendo arquivo...")
     file = await context.bot.get_file(doc.file_id)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = f"{timestamp}_{doc.file_name}"
     local_path = config.UPLOADS_DIR / safe_name
@@ -920,51 +1097,74 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["last_uploaded_file"] = str(local_path)
     context.bot_data[f"file_{doc.file_id}"] = str(local_path)
+
+    # Se for foto enviada sem compressão como arquivo
     if is_image:
         context.user_data["last_uploaded_photo"] = str(local_path)
         context.bot_data[f"photo_{doc.file_id}"] = str(local_path)
+        if current_state == STATE_WAITING_TEMPLATE:
+            await process_template_creation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
+            return
+        if current_state == STATE_WAITING_ADJUSTMENT:
+            await process_report_adjustment(update.message, context, user_id, feedback_text=caption, image_paths=[local_path])
+            return
+
+        database.set_user_state(user_id, STATE_WAITING_REPORT_INPUT)
+        context.user_data.setdefault("report_photos", []).append(local_path)
+        if caption:
+            context.user_data.setdefault("report_texts", []).append(caption)
+
+        total_photos = len([p for p in context.user_data.get("report_photos", []) if Path(p).exists()])
+        current_texts = "\n\n".join(context.user_data.get("report_texts", []))
+        text_info = f"\n📝 <b>Anotações incluídas:</b> <i>'{html.escape(current_texts[:140])}{'...' if len(current_texts) > 140 else ''}'</i>\n" if current_texts else ""
+
+        keyboard = [
+            [InlineKeyboardButton("🚀 Gerar Relatório Agora", callback_data="btn_gen_pending")],
+            [InlineKeyboardButton("🎨 Usar como Modelo de Estilo", callback_data="btn_tpl_pending")],
+            [InlineKeyboardButton("❌ Limpar / Cancelar", callback_data="btn_clear_pending")]
+        ]
+        reply_text = (
+            f"📸 <b>Imagem '{html.escape(doc.file_name or '')}' anexada ao relatório!</b> (Total: {total_photos})\n{text_info}\n"
+            "A I.A extrairá todos os dados técnicos e números contidos na imagem.\n\n"
+            "• ✍️ <b>Envie suas anotações / texto</b> para complementar o relatório;\n"
+            "• 📸 <b>Envie mais fotos</b> se desejar;\n"
+            "• 🚀 <b>Ou clique abaixo para gerar o relatório agora!</b>"
+        )
+        await safe_reply(update.message, reply_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Se for documento de texto/dados (.pdf, .docx, .txt, .csv)
+    context.user_data["pending_file"] = str(local_path)
 
     # Se estava esperando template explicitamente
     if current_state == STATE_WAITING_TEMPLATE:
-        if is_image:
-            await process_template_creation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
-        else:
-            await process_template_creation(update.message, context, user_id, file_path=local_path, raw_text=caption)
+        await process_template_creation(update.message, context, user_id, file_path=local_path, raw_text=caption)
         return
 
     # Se estava esperando entrada de relatório explicitamente
     if current_state == STATE_WAITING_REPORT_INPUT:
-        if is_image:
-            await process_report_generation(update.message, context, user_id, image_paths=[local_path], raw_text=caption)
-        else:
-            await process_report_generation(update.message, context, user_id, file_path=local_path, raw_text=caption)
+        await process_report_generation(update.message, context, user_id, file_path=local_path, raw_text=caption)
         return
 
     # Se estava esperando ajuste explicitamente
     if current_state == STATE_WAITING_ADJUSTMENT:
-        if is_image:
-            await process_report_adjustment(update.message, context, user_id, feedback_text=caption, image_paths=[local_path])
+        await process_report_adjustment(update.message, context, user_id, feedback_text=caption)
         return
 
-    # Se enviou o arquivo diretamente sem comando prévio, pergunta como deseja usar:
-    btn_report_text = "📊 Extrair Dados e Gerar Relatório" if is_image else "📊 Gerar Relatório com este arquivo"
-    btn_action = f"act_pgen_{doc.file_id}" if is_image else f"act_gen_{doc.file_id}"
-    btn_tpl_action = f"act_ptpl_{doc.file_id}" if is_image else f"act_tpl_{doc.file_id}"
-
+    # Se enviou documento no estado IDLE
     keyboard = [
         [
-            InlineKeyboardButton(btn_report_text, callback_data=btn_action)
+            InlineKeyboardButton("📊 Gerar Relatório com este arquivo", callback_data="btn_gen_doc")
         ],
         [
-            InlineKeyboardButton("🎨 Usar como Novo Modelo / Estilo", callback_data=btn_tpl_action)
+            InlineKeyboardButton("🎨 Usar como Novo Modelo / Estilo", callback_data="btn_tpl_doc")
         ],
         [
             InlineKeyboardButton("❌ Cancelar", callback_data="btn_main_menu")
         ]
     ]
     doc_escaped = html.escape(doc.file_name or "arquivo")
-    emoji = "📸" if is_image else "📄"
-    text = f"{emoji} Recebi o arquivo: <code>{doc_escaped}</code>\n\nComo você deseja utilizá-lo?"
+    text = f"📄 Recebi o documento: <code>{doc_escaped}</code>\n\nComo você deseja utilizá-lo?"
     await safe_reply(update.message, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1007,7 +1207,30 @@ async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await process_report_adjustment(update.message, context, user_id, feedback_text=caption, audio_paths=[local_path])
         return
 
-    # Em WAITING_REPORT_INPUT ou envio direto de áudio no chat
+    # Se já há fotos pendentes, combina o áudio com as fotos!
+    pending_photos = [Path(p) for p in context.user_data.get("report_photos", []) if Path(p).exists()]
+    if pending_photos:
+        all_texts = "\n\n".join(context.user_data.get("report_texts", []))
+        if caption:
+            all_texts = (all_texts + "\n\n" + caption).strip()
+        photos_to_use = list(pending_photos)
+
+        context.user_data["report_photos"] = []
+        context.user_data["report_texts"] = []
+        context.user_data["report_audios"] = []
+        database.set_user_state(user_id, STATE_IDLE)
+
+        await process_report_generation(
+            update.message,
+            context,
+            user_id,
+            image_paths=photos_to_use,
+            raw_text=all_texts,
+            audio_paths=[local_path]
+        )
+        return
+
+    # Caso padrão: áudio direto no chat
     await process_report_generation(update.message, context, user_id, audio_paths=[local_path], raw_text=caption)
 
 async def process_template_creation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int,
@@ -1662,6 +1885,8 @@ def main():
 
     # Comandos
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("novo", cmd_novo))
+    app.add_handler(CommandHandler("relatorio", cmd_novo))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     app.add_handler(CommandHandler("help", cmd_ajuda))
     app.add_handler(CommandHandler("cancelar", cmd_cancelar))

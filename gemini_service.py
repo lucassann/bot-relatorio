@@ -106,7 +106,15 @@ GUIA:
     contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(prompt)
 
-    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    candidate_models = [
+        config.GEMINI_MODEL,
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-2.5-pro"
+    ]
     models_to_try = []
     for mod in candidate_models:
         if mod and mod not in models_to_try:
@@ -155,11 +163,11 @@ def generate_report(raw_content: str, style_instructions: str,
         raise ValueError("Chave GEMINI_API_KEY não configurada no arquivo .env!")
 
     system_instruction = """Você é um redator executivo e analista sênior de dados com capacidades avançadas de OCR, visão computacional e transcrição/análise de áudio multimodal.
-Sua missão é transformar rascunhos, dados brutos, anotações, documentos, FOTOS/IMAGENS (recibos, notas fiscais, relatórios escaneados, dashboards, gráficos, planilhas impressas, lousas) ou ÁUDIOS/GRAVAÇÕES DE VOZ em um relatório profissional de altíssimo nível.
+Sua missão é transformar rascunhos, dados brutos, anotações, documentos, FOTOS/IMAGENS (recibos, notas fiscais, relatórios escaneados, dashboards, gráficos, planilhas impressas, lousas, fotos de plaquetas de identificação de equipamentos, componentes mecânicos e elétricos, painéis ou defeitos) ou ÁUDIOS/GRAVAÇÕES DE VOZ em um relatório profissional de altíssimo nível.
 Ao analisar imagens ou áudios:
-1. Em imagens: extraia detalhadamente todos os dados textuais, datas, nomes, tabelas, números, valores financeiros e métricas visíveis.
-2. Em áudios/mensagens de voz: transcreva e interprete fielmente tudo o que foi falado pelo usuário, extraindo metas, valores, decisões, responsáveis e conclusões.
-3. Integre perfeitamente as informações extraídas das fotos e áudios com o texto ou rascunho enviado pelo usuário.
+1. Em imagens/fotos: realize leitura técnica visual e OCR completo, extraindo minuciosamente todos os dados textuais e numéricos visíveis: fabricante, família, modelo, número de série, ano de fabricação, tensão/alimentação, corrente, potência, pressão, vazão, fluido/gás refrigerante, peso, valores e parâmetros exibidos em displays ou plaquetas.
+2. Em anotações de texto e áudios: transcreva e considere integralmente todas as observações de campo trazidas pelo usuário (sintomas, ocorrências, alarmes, diagnósticos, peças danificadas, testes efetuados, ações corretivas, serviços executados e recomendações).
+3. Integração total: cruze com precisão os dados técnicos extraídos das fotos com as anotações textuais do usuário. Adeque todas as informações nas respectivas seções estruturadas do Guia de Estilo (ex: Informações Gerais / Equipamento, Diagnóstico, Serviços Executados, Peças, Recomendações e Riscos).
 4. Siga rigorosamente o LAYOUT, ESTRUTURA DE SEÇÕES e ESTILO especificados no Guia de Estilo.
 Formate a resposta em Markdown padrão:
 - Use # para o Título Principal
@@ -176,18 +184,30 @@ NÃO inclua blocos ```markdown no início ou fim, apenas o texto do relatório d
 
 {f'--- PEDIDO ADICIONAL DO USUÁRIO ---\n{extra_prompt}\n--- FIM DO PEDIDO ---' if extra_prompt else ''}
 
---- DADOS BRUTOS / RASCUNHO FORNECIDOS ---
-{raw_content if raw_content.strip() else '[Dados contidos nas imagens, fotos ou áudios/vozes anexados]'}
---- FIM DOS DADOS BRUTOS ---
+--- ANOTAÇÕES / DADOS FORNECIDOS PELO USUÁRIO (TEXTO OU ÁUDIO) ---
+{raw_content if raw_content.strip() else '[Dados e informações visuais contidos nas fotos / imagens anexadas]'}
+--- FIM DAS ANOTAÇÕES ---
 
-Analise com atenção todas as fotos/imagens, áudios e textos fornecidos. Extraia minuciosamente todos os números, tabelas, dados e informações e gere o relatório completo estruturado de acordo com o Guia de Estilo."""
+INSTRUÇÕES CRÍTICAS DE EXECUÇÃO:
+1. Analise cuidadosamente todas as fotos/imagens anexadas (plaquetas técnicas, etiquetas, painéis, componentes de equipamentos, comprovantes).
+2. Extraia TODOS os dados técnicos visíveis (fabricante, modelo, número de série, especificações elétricas/mecânicas, parâmetros operacionais).
+3. Combine e integre fielmente as informações extraídas das fotos com as anotações de texto/áudio fornecidas pelo usuário.
+4. Preencha e adeque rigorosamente cada seção do relatório de acordo com o Guia de Estilo acima."""
 
     contents = []
     contents.extend(_prepare_image_parts(image_paths))
     contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(user_message)
 
-    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    candidate_models = [
+        config.GEMINI_MODEL,
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-2.5-pro"
+    ]
     models_to_try = []
     for mod in candidate_models:
         if mod and mod not in models_to_try:
@@ -242,7 +262,15 @@ Reescreva o relatório completo aplicando pontualmente todos os ajustes solicita
     contents.extend(_prepare_audio_parts(audio_paths))
     contents.append(prompt)
 
-    candidate_models = [config.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    candidate_models = [
+        config.GEMINI_MODEL,
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-2.5-pro"
+    ]
     models_to_try = []
     for mod in candidate_models:
         if mod and mod not in models_to_try:
